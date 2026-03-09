@@ -237,10 +237,14 @@ app.post("/api/content/generate", async (req, res) => {
     let internalPages = [];
     if (wordpressUrl) {
       try {
-        const wpRes = await axios.get(`${wordpressUrl}/wp-json/wp/v2/pages?per_page=20`, { httpsAgent });
-        internalPages = wpRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug }));
+        const wpPagesRes = await axios.get(`${wordpressUrl}/wp-json/wp/v2/pages?per_page=20&_fields=title,link,slug`, { httpsAgent });
+        const pages = wpPagesRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "page" }));
+        // Also fetch published blog posts for topic cluster internal linking
+        const wpPostsRes = await axios.get(`${wordpressUrl}/wp-json/wp/v2/posts?per_page=30&status=publish&_fields=title,link,slug`, { httpsAgent });
+        const posts = wpPostsRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "post" }));
+        internalPages = [...pages, ...posts];
       } catch (e) {
-        console.log("Could not fetch WordPress pages:", e.message);
+        console.log("Could not fetch WordPress pages/posts:", e.message);
       }
     }
 
@@ -263,16 +267,29 @@ app.post("/api/content/generate", async (req, res) => {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
     const internalLinksPrompt = internalPages.length > 0
-      ? `\n\nAvailable internal pages to link to naturally within the content:\n${internalPages.map(p => `- ${p.title}: ${p.url}`).join("\n")}\nInclude 2-3 natural internal links to relevant pages.`
+      ? `\n\nINTERNAL LINKS — TOPIC CLUSTER LINKING RULES:
+Available internal pages and previously published blog posts to link to:
+${internalPages.map(p => `- ${p.title}: ${p.url}`).join("\n")}
+Linking rules:
+1. Prioritize linking to PREVIOUSLY PUBLISHED BLOG POSTS (not just service pages) to build topic clusters. This helps search engines understand content relationships.
+2. Only link when the topic is genuinely related — use contextual anchor text that describes the destination page's content.
+3. KEYWORD CANNIBALIZATION: Do NOT link to any page that targets the exact same keyword or intent as this post. If a page would compete with this post in search results for the same query, skip it. Instead, link to complementary topics (e.g., a post about "AC repair" could link to "signs your AC needs maintenance" but NOT to another "AC repair" post).
+4. If no previously published blog posts exist yet, only link to relevant service pages. Do not force internal links if no relevant pages exist — 0 internal links is better than irrelevant ones.
+5. Include 2-3 internal links if relevant pages exist; fewer or none if they don't.`
       : "";
 
-    const externalLinksPrompt = `\n\nInclude 1-2 external links to authoritative sources. ONLY link to these exact homepage-level URLs — do not guess at subpages or specific articles:
-- HVAC/Energy: https://www.energystar.gov or https://www.energy.gov
-- Plumbing/Water: https://www.epa.gov/watersense
-- Electrical/Safety: https://www.esfi.org (Electrical Safety Foundation)
-- Roofing: https://www.nrca.net (National Roofing Contractors Association)
-- General home safety: https://www.cpsc.gov
-Use the homepage or top-level domain only. Never link to a specific article or subpage URL you are not 100% certain exists.`;
+    const externalLinksPrompt = `\n\nEXTERNAL LINKS — OUTBOUND LINKING RULES:
+Include 1-2 external links to authoritative sources. Follow these rules strictly:
+1. Link to a RESOURCE-SPECIFIC PAGE (a specific guide, data page, article, or stats page) — NOT a homepage or top-level domain. For example: a specific Energy Star product criteria page, or a specific EPA water efficiency fact page.
+2. The linked page must contain a SPECIFIC FACT or STATISTIC directly relevant to this blog post. Reference that fact inline in your writing (e.g., "According to the EPA, the average household wastes 10,000 gallons of water per year from leaks...").
+3. Anchor text should describe the resource or cite the fact — not "click here" or a bare URL.
+4. If you cannot confidently identify a specific resource page URL that actually exists, do NOT invent a URL — skip the external link rather than fabricate one.
+5. Draw from these authoritative domains (find a specific resource page within them, not the homepage):
+   - HVAC/Energy: energystar.gov or energy.gov
+   - Plumbing/Water: epa.gov/watersense or epa.gov
+   - Electrical/Safety: esfi.org
+   - Roofing: nrca.net
+   - General home safety: cpsc.gov`;
 
     const systemPrompt = `You are a professional SEO content writer specializing in home service companies.
 You write blog posts that are helpful, locally relevant, and optimized for search engines.
@@ -1451,8 +1468,11 @@ const publishPostForClient = async (client, keyword) => {
     let internalPages = [];
     if (client.wordpress_url) {
       try {
-        const wpRes = await axios.get(`${client.wordpress_url}/wp-json/wp/v2/pages?per_page=20`, { httpsAgent });
-        internalPages = wpRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug }));
+        const wpPagesRes = await axios.get(`${client.wordpress_url}/wp-json/wp/v2/pages?per_page=20&_fields=title,link,slug`, { httpsAgent });
+        const pages = wpPagesRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "page" }));
+        const wpPostsRes = await axios.get(`${client.wordpress_url}/wp-json/wp/v2/posts?per_page=30&status=publish&_fields=title,link,slug`, { httpsAgent });
+        const posts = wpPostsRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "post" }));
+        internalPages = [...pages, ...posts];
       } catch (e) {}
     }
 
@@ -1469,18 +1489,23 @@ const publishPostForClient = async (client, keyword) => {
     }
 
     const internalLinksPrompt = internalPages.length > 0
-      ? ("\n\nAvailable internal pages:\n" + internalPages.map(p => "- " + p.title + ": " + p.url).join("\n") + "\nInclude 2-3 natural internal links.")
+      ? ("\n\nINTERNAL LINKS — TOPIC CLUSTER LINKING RULES:\nAvailable internal pages and previously published blog posts to link to:\n" + internalPages.map(p => "- " + p.title + ": " + p.url).join("\n") + "\nLinking rules:\n1. Prioritize linking to PREVIOUSLY PUBLISHED BLOG POSTS to build topic clusters.\n2. Only link when the topic is genuinely related — use contextual anchor text.\n3. KEYWORD CANNIBALIZATION: Do NOT link to any page targeting the same keyword or intent as this post. Link to complementary topics only.\n4. If no relevant pages exist, do not force internal links — 0 internal links beats irrelevant ones.\n5. Include 2-3 internal links if relevant pages exist; fewer or none if they don't.")
       : "";
 
     const externalLinksPrompt = `
 
-Include 1-2 external links to authoritative sources. ONLY link to these exact homepage-level URLs:
-- HVAC/Energy: https://www.energystar.gov or https://www.energy.gov
-- Plumbing/Water: https://www.epa.gov/watersense
-- Electrical/Safety: https://www.esfi.org
-- Roofing: https://www.nrca.net
-- General: https://www.cpsc.gov
-Never link to a specific subpage you are not 100% certain exists.`;
+EXTERNAL LINKS — OUTBOUND LINKING RULES:
+Include 1-2 external links to authoritative sources. Follow these rules strictly:
+1. Link to a RESOURCE-SPECIFIC PAGE (a specific guide, data page, article, or stats page) — NOT a homepage or top-level domain.
+2. The linked page must contain a SPECIFIC FACT or STATISTIC directly relevant to this blog post. Reference that fact inline in your writing.
+3. Anchor text should describe the resource or cite the fact — not "click here" or a bare domain name.
+4. If you cannot confidently identify a specific resource page URL that actually exists, do NOT invent a URL — skip the external link rather than fabricate one.
+5. Draw from these authoritative domains (find a specific resource page within them, not the homepage):
+   - HVAC/Energy: energystar.gov or energy.gov
+   - Plumbing/Water: epa.gov/watersense or epa.gov
+   - Electrical/Safety: esfi.org
+   - Roofing: nrca.net
+   - General home safety: cpsc.gov`;
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
