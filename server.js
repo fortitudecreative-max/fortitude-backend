@@ -81,6 +81,21 @@ app.put("/api/clients/:id", async (req, res) => {
   res.json({ client: data[0] });
 });
 
+app.delete("/api/clients/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    await supabase.from("scheduled_jobs").delete().eq("client_id", id);
+    await supabase.from("client_keyword_queue").delete().eq("client_id", id);
+    await supabase.from("posts").delete().eq("client_id", id);
+    await supabase.from("image_library").delete().eq("client_id", id);
+    const { error } = await supabase.from("clients").delete().eq("id", id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── KEYWORD LIBRARY ─────────────────────────────────────────────
 app.get("/api/keywords/library", async (req, res) => {
   const { industry } = req.query;
