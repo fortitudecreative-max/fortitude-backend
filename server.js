@@ -663,7 +663,7 @@ app.post("/api/keywords/monthly-refresh/:clientId", async (req, res) => {
 
     const needed = 30 - gapKeywords.length;
     const { data: libraryKeywords } = await supabase.from("keyword_library")
-      .select("*").eq("industry", client.industry)
+      .select("*").ilike("industry", client.industry)
       .order("volume", { ascending: false })
       .limit(needed + 20);
 
@@ -684,6 +684,10 @@ app.post("/api/keywords/monthly-refresh/:clientId", async (req, res) => {
       month,
       used: false,
     }));
+
+    if (inserts.length === 0) {
+      return res.status(400).json({ error: `No keywords found for industry "${client.industry}". Add keywords to the library first, or add competitors so gap keywords can be generated.` });
+    }
 
     await supabase.from("client_keyword_queue").insert(inserts);
     await supabase.from("clients").update({ next_keyword_index: 0 }).eq("id", clientId);
