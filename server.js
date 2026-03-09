@@ -673,7 +673,36 @@ app.post("/api/keywords/monthly-refresh/:clientId", async (req, res) => {
       .slice(0, needed)
       .map(k => ({ keyword: k.keyword, volume: k.volume, intent: k.intent, source: "library" }));
 
-    const allKeywords = [...gapKeywords, ...libraryFill];
+    let allKeywords = [...gapKeywords, ...libraryFill];
+
+    // AI fallback: if we still need more keywords, generate them with Claude
+    if (allKeywords.length < 15) {
+      const stillNeeded = 30 - allKeywords.length;
+      const existingSet = new Set(allKeywords.map(k => k.keyword.toLowerCase()));
+      try {
+        const aiFallbackMsg = await anthropic.messages.create({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          messages: [{
+            role: "user",
+            content: `You are an SEO expert. Generate ${stillNeeded} high-intent keyword phrases for a ${client.industry} business called "${client.name}"${client.domain ? ` with website ${client.domain}` : ""}. Focus on: local service keywords, emergency service terms, cost/pricing keywords, how-to guides, and comparison keywords. You MUST respond with ONLY a raw JSON array of ${stillNeeded} strings. No explanation, no markdown, no preamble. Example: ["ac repair near me","hvac tune up cost","emergency furnace repair"]`
+          }],
+        });
+        const textBlock = aiFallbackMsg.content.find(b => b.type === "text");
+        if (textBlock) {
+          const clean = textBlock.text.trim().replace(/```json|```/g, "").trim();
+          const parsed = JSON.parse(clean);
+          const aiKeywords = parsed
+            .filter(kw => !existingSet.has(kw.toLowerCase()))
+            .slice(0, stillNeeded)
+            .map(kw => ({ keyword: kw, source: "ai", intent: "Transactional" }));
+          allKeywords = [...allKeywords, ...aiKeywords];
+          console.log(`AI fallback generated ${aiKeywords.length} keywords for ${client.name}`);
+        }
+      } catch(e) {
+        console.log("AI fallback keyword error:", e.message);
+      }
+    }
 
     const inserts = allKeywords.map(k => ({
       client_id: clientId,
@@ -686,7 +715,7 @@ app.post("/api/keywords/monthly-refresh/:clientId", async (req, res) => {
     }));
 
     if (inserts.length === 0) {
-      return res.status(400).json({ error: `No keywords found for industry "${client.industry}". Add keywords to the library first, or add competitors so gap keywords can be generated.` });
+      return res.status(400).json({ error: `Failed to generate keywords for "${client.name}". Please try again.` });
     }
 
     await supabase.from("client_keyword_queue").insert(inserts);
