@@ -158,6 +158,11 @@ app.post("/api/clients", async (req, res) => {
 app.put("/api/clients/:id", async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
+  // Auto-promote to active when a WordPress URL is saved and status is still pending
+  if (updates.wordpress_url && !updates.status) {
+    const { data: existing } = await supabase.from("clients").select("status").eq("id", id).single();
+    if (existing?.status === "pending") updates.status = "active";
+  }
   const { data, error } = await supabase.from("clients").update(updates).eq("id", id).select();
   if (error) return res.status(500).json({ error: error.message });
   res.json({ client: data[0] });
