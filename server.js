@@ -1609,6 +1609,7 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
       { content: html, status: "publish" }, { headers: authHeaders, httpsAgent });
   };
 
+  const passHistory = [];
   log(`Starting — post ${wpPostId}, keyphrase: "${keyword}"`);
   try { currentContent = await getPostHtml(); }
   catch(e) { log(`Could not fetch post: ${e.message}`); return { yoastScore: null, passes: 0, issues: [], fixes }; }
@@ -1619,14 +1620,27 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
     if (issues.length === 0) { log(`✓ All Yoast checks passed`); break; }
 
     let metaChanged = false, contentChanged = false;
+    const attemptedThisPass = [];
+
+    // Build escalation context from prior failed passes
+    const priorAttempts = passHistory.length > 0
+      ? `\n\nPREVIOUS ATTEMPTS THAT FAILED:\n` + passHistory.map((h, i) =>
+          `Pass ${i + 1}: Tried [${h.attempted.join(", ")}]. Still failing after: [${h.remaining.join(", ")}].`
+        ).join("\n") + `\n\nUse a DIFFERENT approach this time. Rewrite entire paragraphs, add new sentences, rename headings completely. Do not repeat the same edits.`
+      : "";
 
     // Fix: meta description too long
     const metaIssue = issues.find(i => i.type === "meta_length");
     if (metaIssue) {
+      attemptedThisPass.push("meta_length");
+      const priorMetaFails = passHistory.filter(h => h.attempted.includes("meta_length")).length;
+      const metaPrompt = priorMetaFails > 0
+        ? `PREVIOUS ${priorMetaFails} ATTEMPT(S) FAILED — result was still over 156 chars. Write something significantly shorter, aim for 125-140 characters. Cut aggressively while keeping "${keyword}". Return ONLY the text, no quotes.\n\nCurrent (${metaIssue.length} chars): "${currentMeta}"`
+        : `Rewrite to be UNDER 156 characters while keeping the keyphrase "${keyword}" and the same meaning. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"`;
       try {
         const msg = await anthropic.messages.create({
           model: "claude-sonnet-4-20250514", max_tokens: 300,
-          messages: [{ role: "user", content: `Rewrite this meta description to be UNDER 156 characters while keeping the keyphrase "${keyword}" and the same meaning. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"` }]
+          messages: [{ role: "user", content: metaPrompt }]
         });
         const newMeta = msg.content[0].text.trim().replace(/^["']|["']$/g, "");
         if (newMeta.length >= 80 && newMeta.length <= 156) {
@@ -1640,10 +1654,15 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
     // Fix: keyphrase not in SEO title
     const titleIssue = issues.find(i => i.type === "title");
     if (titleIssue) {
+      attemptedThisPass.push("title");
+      const priorTitleFails = passHistory.filter(h => h.attempted.includes("title")).length;
+      const titlePrompt = priorTitleFails > 0
+        ? `PREVIOUS ${priorTitleFails} ATTEMPT(S) FAILED. Missing words: ${titleIssue.missingWords.join(", ")}. Start with the EXACT phrase "${keyword}" word-for-word — no paraphrasing. Max 60 chars. Return ONLY the title, no suffix, no quotes.\n\nCurrent: "${currentTitle.replace(/ - %%sitename%%/, "")}"`
+        : `Rewrite this SEO title so it STARTS WITH the exact keyphrase "${keyword}". Keep the post topic clear. Max 60 characters. Return ONLY the title text, no suffix, no quotes.\n\nCurrent: "${currentTitle.replace(/ - %%sitename%%/, "")}"`;
       try {
         const msg = await anthropic.messages.create({
           model: "claude-sonnet-4-20250514", max_tokens: 200,
-          messages: [{ role: "user", content: `Rewrite this SEO title so it STARTS WITH the exact keyphrase "${keyword}". Keep the post topic clear. Max 60 characters (not counting the site name suffix). Return ONLY the title text, no suffix, no quotes.\n\nCurrent title: "${currentTitle.replace(/ - %%sitename%%/, "")}"` }]
+          messages: [{ role: "user", content: titlePrompt }]
         });
         const newTitle = msg.content[0].text.trim().replace(/^["']|["']$/g, "").replace(/ - %%sitename%%$/, "") + " - %%sitename%%";
         currentTitle = newTitle; metaChanged = true;
@@ -1660,11 +1679,22 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
     // Fix: keyphrase density + subheadings (content rewrite)
     const needsContentFix = issues.some(i => i.type === "density" || i.type === "subheadings");
     if (needsContentFix) {
-      const densityIssue  = issues.find(i => i.type === "density");
-      const headingIssue  = issues.find(i => i.type === "subheadings");
+      const densityIssue = issues.find(i => i.type === "density");
+      const headingIssue = issues.find(i => i.type === "subheadings");
+      if (densityIssue) attemptedThisPass.push("density");
+      if (headingIssue) attemptedThisPass.push("subheadings");
+
+      const priorContentFails = passHistory.filter(h =>
+        h.attempted.includes("density") || h.attempted.includes("subheadings")
+      ).length;
+
+      const escalation = priorContentFails > 0
+        ? `\n\nCRITICAL — PREVIOUS ${priorContentFails} REWRITE(S) FAILED. Take a completely different approach:\n- Rewrite entire paragraphs from scratch, not just minor tweaks.\n- Add 2-3 brand new sentences in different sections that naturally use "${keyword}".\n- For headings: completely rename them — don't just insert a word.\n- Be bold and aggressive with changes.${priorAttempts}`
+        : "";
+
       const contentFixList = [];
-      if (densityIssue) contentFixList.push(`Keyphrase density too low: found "${keyword}" only ${densityIssue.kwCount} times, need at least ${densityIssue.minOccurrences}. Naturally weave the exact phrase into more paragraphs throughout the post — do not force it awkwardly.`);
-      if (headingIssue) contentFixList.push(`Keyphrase missing from H2/H3 subheadings. Rewrite at least 2 headings to include "${keyword}" or a close synonym. Current headings: ${headingIssue.headings.join(" | ")}`);
+      if (densityIssue) contentFixList.push(`Keyphrase density: found "${keyword}" only ${densityIssue.kwCount} times, need ${densityIssue.minOccurrences}+ in ${densityIssue.wordCount} words. Weave the exact phrase naturally into more paragraphs.`);
+      if (headingIssue) contentFixList.push(`Keyphrase in subheadings: no H2/H3 contains "${keyword}" or synonyms. Rewrite at least 2 headings. Current: ${headingIssue.headings.join(" | ")}`);
 
       try {
         const schemaMatch = currentContent.match(/(<script type="application\/ld\+json">[\s\S]*?<\/script>\s*)+$/i);
@@ -1673,14 +1703,14 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
 
         const msg = await anthropic.messages.create({
           model: "claude-sonnet-4-20250514", max_tokens: 6000,
-          system: `You are an expert SEO blog editor. Fix ONLY the listed Yoast SEO issues. Preserve all existing links, images, and post structure. Output ONLY the corrected HTML body content — no preamble, no markdown, no explanation.`,
-          messages: [{ role: "user", content: `Fix these Yoast SEO issues:\n\n${contentFixList.join("\n\n")}\n\nPost keyword: "${keyword}"\n\nCurrent HTML:\n---\n${bodyHtml.slice(0, 24000)}\n---\n\nReturn ONLY the corrected HTML body.` }]
+          system: `You are an expert SEO blog editor. Fix ONLY the listed Yoast SEO issues. Preserve all existing links, images, and post structure. Output ONLY the corrected HTML body — no preamble, no markdown, no explanation.`,
+          messages: [{ role: "user", content: `Fix these Yoast SEO issues:\n\n${contentFixList.join("\n\n")}${escalation}\n\nPost keyword: "${keyword}"\n\nCurrent HTML:\n---\n${bodyHtml.slice(0, 24000)}\n---\n\nReturn ONLY the corrected HTML body.` }]
         });
         let rewritten = msg.content[0].text.trim().replace(/^```html?\n?/i, "").replace(/```$/m, "").trim();
         if (schemaBlock) rewritten = rewritten + "\n" + schemaBlock;
         currentContent = rewritten; contentChanged = true;
-        fixes.push({ pass, type: [densityIssue && "density", headingIssue && "subheadings"].filter(Boolean).join("+"), fix: "AI content rewrite" });
-        log(`Content rewritten`);
+        fixes.push({ pass, type: [densityIssue && "density", headingIssue && "subheadings"].filter(Boolean).join("+"), fix: priorContentFails > 0 ? `AI rewrite (escalated attempt ${priorContentFails + 1})` : "AI content rewrite" });
+        log(`Content rewritten (escalation level: ${priorContentFails})`);
       } catch(e) { log(`Content rewrite failed: ${e.message}`); }
 
       if (contentChanged) {
@@ -1688,6 +1718,10 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
         catch(e) { log(`Content write failed: ${e.message}`); }
       }
     }
+
+    // Record what this pass tried and what still remains after
+    const remainingAfter = checkIssues(currentContent, currentTitle, currentMeta, keyword);
+    passHistory.push({ pass, attempted: attemptedThisPass, remaining: remainingAfter.map(i => i.type) });
 
     if (!metaChanged && !contentChanged) { log(`No fixes applied on pass ${pass}, stopping`); break; }
   }
