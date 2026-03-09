@@ -38,30 +38,71 @@ const requireAuth = async (req, res, next) => {
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
-// ─── YOAST EDITION DETECTION ─────────────────────────────────────────────────
-// Returns "premium", "free", or "none"
-const detectYoastEdition = async (wpBaseUrl, authHeaders) => {
+// ─── YOAST / SEO PLUGIN DETECTION ────────────────────────────────────────────
+// Returns { yoast: "premium"|"free"|"none", fortitudePlugin: true|false, canWriteSeoMeta: true|false }
+const detectSeoCapabilities = async (wpBaseUrl, authHeaders) => {
+  const result = { yoast: "none", fortitudePlugin: false, canWriteSeoMeta: false };
+
+  // 1. Check if Fortitude SEO meta writer plugin is installed (most reliable write path)
   try {
-    // Yoast Premium exposes this REST route
+    const r = await axios.post(`${wpBaseUrl}/wp-json/fortitude/v1/seo-meta`,
+      { post_id: 0, _probe: true }, // send invalid post_id — plugin will 400 but we know it's there
+      { headers: authHeaders, httpsAgent, timeout: 6000 }
+    );
+    result.fortitudePlugin = true;
+  } catch(e) {
+    // 404 = not installed; 400/422 = installed but rejected invalid post_id (that's fine)
+    if (e.response?.status === 400 || e.response?.status === 422 || e.response?.status === 200) {
+      result.fortitudePlugin = true;
+    }
+    // 404 = definitely not installed
+  }
+
+  // 2. Check for Yoast Free or Premium via their REST namespace
+  try {
     const r = await axios.get(`${wpBaseUrl}/wp-json/yoast/v1/get_head?url=${encodeURIComponent(wpBaseUrl)}`, {
       headers: authHeaders, httpsAgent, timeout: 6000,
     });
-    if (r.status === 200 && r.data) return "premium";
-  } catch(e) {}
-  try {
-    // Yoast Free (any edition) registers this public route
-    const r = await axios.get(`${wpBaseUrl}/wp-json/yoast/v1/get_head?url=${encodeURIComponent(wpBaseUrl)}`, {
-      httpsAgent, timeout: 6000,
-    });
-    if (r.status === 200) return "free";
-  } catch(e) {}
-  // Try SEO Framework as fallback marker
-  try {
-    const r = await axios.get(`${wpBaseUrl}/wp-json/wp/v2/posts?per_page=1`, { headers: authHeaders, httpsAgent, timeout: 5000 });
-    // If we get here Yoast just might not be registering the route yet — assume free
-    return "free";
-  } catch(e) {}
-  return "none";
+    if (r.status === 200 && r.data) {
+      // Yoast Premium adds indexing_reasons, zapier, etc. to the head response
+      const body = typeof r.data === "string" ? r.data : JSON.stringify(r.data);
+      result.yoast = body.includes("zapier") || body.includes("indexing") ? "premium" : "free";
+    }
+  } catch(e) {
+    // Yoast Free also responds to this route without auth on some setups
+    try {
+      const r2 = await axios.get(`${wpBaseUrl}/wp-json/yoast/v1/get_head?url=${encodeURIComponent(wpBaseUrl)}`, {
+        httpsAgent, timeout: 6000,
+      });
+      if (r2.status === 200) result.yoast = "free";
+    } catch(e2) {}
+  }
+
+  // 3. If no Fortitude plugin, check if Yoast has registered meta keys via REST
+  //    (by checking if a dummy post's meta contains Yoast keys in the schema)
+  if (!result.fortitudePlugin && result.yoast !== "none") {
+    try {
+      const r = await axios.get(`${wpBaseUrl}/wp-json/wp/v2/posts?per_page=1&context=edit`, {
+        headers: authHeaders, httpsAgent, timeout: 6000,
+      });
+      const meta = r.data?.[0]?.meta || {};
+      const hasYoastKeys = Object.keys(meta).some(k => k.startsWith("_yoast_wpseo_"));
+      result.canWriteSeoMeta = hasYoastKeys;
+      if (!hasYoastKeys) {
+        console.log("[Yoast] REST meta keys NOT registered — Fortitude plugin needed for reliable write");
+      }
+    } catch(e) {}
+  } else if (result.fortitudePlugin) {
+    result.canWriteSeoMeta = true; // Fortitude plugin handles it
+  }
+
+  return result;
+};
+
+// Legacy wrapper for backward compat
+const detectYoastEdition = async (wpBaseUrl, authHeaders) => {
+  const caps = await detectSeoCapabilities(wpBaseUrl, authHeaders);
+  return caps.yoast;
 };
 
 // Make a longtail keyphrase variant to avoid exact-match cannibalization
@@ -535,39 +576,49 @@ app.post("/api/publish/wordpress", async (req, res) => {
     const wpPost = wpRes.data;
     console.log("✓ Post created, ID:", wpPost.id);
 
-    // ── Enforce 156-char meta description hard limit ─────────────────────────
-    const safeMetaDesc = (metaDescription || "").length > 156
-      ? (metaDescription || "").slice(0, 153).trimEnd() + "..."
-      : (metaDescription || "");
-
-    // ── Use longtail keyphrase to prevent exact-match cannibalization ─────────
-    const longtailKeyphrase = makeLongtailKeyphrase(keyword);
-    console.log(`[Yoast] Keyphrase: "${keyword}" → longtail: "${longtailKeyphrase}"`);
-    console.log(`[Yoast] Meta desc length: ${safeMetaDesc.length} chars`);
-
-    // ── Detect Yoast edition to write correct meta ───────────────────────────
-    let yoastEdition = "none";
-    try { yoastEdition = await detectYoastEdition(wordpressUrl, authHeaders); } catch(e) {}
-    console.log(`[Yoast] Edition detected: ${yoastEdition}`);
+    // ── Detect SEO capabilities: Fortitude plugin + Yoast edition ────────────
+    let seoCaps = { yoast: "none", fortitudePlugin: false, canWriteSeoMeta: false };
+    try { seoCaps = await detectSeoCapabilities(wordpressUrl, authHeaders); } catch(e) {}
+    const yoastEdition = seoCaps.yoast;
+    console.log(`[Yoast] Caps: edition=${yoastEdition}, fortitudePlugin=${seoCaps.fortitudePlugin}, canWrite=${seoCaps.canWriteSeoMeta}`);
 
     try {
-      if (yoastEdition !== "none") {
-        // Write Yoast meta — works for both Free and Premium via postmeta
-        await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
-          meta: {
-            _yoast_wpseo_focuskw: longtailKeyphrase,
-            _yoast_wpseo_metadesc: safeMetaDesc,
-            _yoast_wpseo_title: `${title} - %%sitename%%`,
-            _yoast_wpseo_opengraph_title: title,
-            _yoast_wpseo_opengraph_description: safeMetaDesc,
-            "astra-migrate-meta-layouts": "set",
-            "_elementor_template_type": "wp-post",
+      if (seoCaps.canWriteSeoMeta || seoCaps.fortitudePlugin) {
+        // Path A: Fortitude plugin (calls WPSEO_Meta::set_value directly — works for Free + Premium)
+        if (seoCaps.fortitudePlugin) {
+          try {
+            const r = await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/seo-meta`, {
+              post_id: wpPost.id,
+              focuskw: longtailKeyphrase,
+              metadesc: safeMetaDesc,
+              title: `${title} - %%sitename%%`,
+            }, { headers: authHeaders, httpsAgent });
+            if (r.data?.success) console.log("✓ Yoast meta written via Fortitude plugin");
+          } catch(e) {
+            console.log("[Yoast] Fortitude seo-meta write failed:", e.message);
           }
-        }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-        console.log("✓ Yoast meta written via REST postmeta");
+        }
 
-        // ── Trigger Yoast score recalculation (fires save hooks the REST API skips) ──
-        // First try the Fortitude plugin recalc endpoint
+        // Path B: Direct REST postmeta (only if Yoast registered the keys)
+        if (!seoCaps.fortitudePlugin && seoCaps.canWriteSeoMeta) {
+          await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
+            meta: {
+              _yoast_wpseo_focuskw: longtailKeyphrase,
+              _yoast_wpseo_metadesc: safeMetaDesc,
+              _yoast_wpseo_title: `${title} - %%sitename%%`,
+              _yoast_wpseo_opengraph_title: title,
+              _yoast_wpseo_opengraph_description: safeMetaDesc,
+            }
+          }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
+          console.log("✓ Yoast meta written via REST postmeta");
+        }
+
+        // Always write Astra layout meta
+        await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
+          meta: { "astra-migrate-meta-layouts": "set", "_elementor_template_type": "wp-post" }
+        }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }).catch(() => {});
+
+        // ── Trigger Yoast score recalculation ──────────────────────────────────
         let recalcOk = false;
         try {
           await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
@@ -576,29 +627,37 @@ app.post("/api/publish/wordpress", async (req, res) => {
           );
           recalcOk = true;
           console.log("✓ Yoast scores recalculated via Fortitude plugin");
-        } catch (e) {
-          console.log("Fortitude recalc not available:", e.message);
-        }
+        } catch (e) {}
 
-        // Fallback: do a no-op WP post update to fire Yoast's wp_update_post hooks
         if (!recalcOk) {
+          // No-op post touch to fire wp_update_post hooks (triggers Yoast score recalc)
           try {
             await new Promise(r => setTimeout(r, 1500));
             await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`,
-              { status: "publish" }, // no-op touch — fires save hooks
+              { status: "publish" },
               { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }
             );
             console.log("✓ Yoast scores triggered via no-op post update");
-          } catch(e) {
-            console.log("No-op post update failed:", e.message);
-          }
+          } catch(e) {}
         }
+      } else if (yoastEdition === "none") {
+        console.log("[Yoast] No Yoast plugin detected — skipping SEO meta write. Install fortitude-seo-meta-writer.php to enable.");
+        // Still write Astra layout meta
+        await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
+          meta: { "astra-migrate-meta-layouts": "set", "_elementor_template_type": "wp-post" }
+        }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }).catch(() => {});
       } else {
-        console.log("[Yoast] No Yoast plugin detected — skipping Yoast meta write");
-        // Still write Astra layout meta even without Yoast
+        // Yoast installed but REST keys not registered and no Fortitude plugin
+        console.log(`[Yoast] ${yoastEdition} detected but REST meta keys not registered. Install fortitude-seo-meta-writer.php for reliable meta writing.`);
+        // Attempt REST write anyway as last resort
         try {
           await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
-            meta: { "astra-migrate-meta-layouts": "set", "_elementor_template_type": "wp-post" }
+            meta: {
+              _yoast_wpseo_focuskw: longtailKeyphrase,
+              _yoast_wpseo_metadesc: safeMetaDesc,
+              _yoast_wpseo_title: `${title} - %%sitename%%`,
+              "astra-migrate-meta-layouts": "set",
+            }
           }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
         } catch(e) {}
       }
@@ -662,7 +721,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
       }
     }
 
-    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult, yoastEdition, longtailKeyphrase });
+    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta });
   } catch (error) {
     console.error("WordPress publish error:", error.response?.data || error.message);
     res.status(500).json({ error: "Failed to publish to WordPress", detail: error.response?.data?.message || error.message });
