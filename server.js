@@ -3099,7 +3099,7 @@ app.post("/api/seo/fix", async (req, res) => {
 // ─── GOOGLE BUSINESS PROFILE ─────────────────────────────────────
 const GBP_CLIENT_ID = process.env.GBP_CLIENT_ID;
 const GBP_CLIENT_SECRET = process.env.GBP_CLIENT_SECRET;
-const GBP_REDIRECT_URI = `http://localhost:${PORT}/api/gbp/oauth/callback`;
+const GBP_REDIRECT_URI = `https://fortitude-backend-production.up.railway.app/api/gbp/oauth/callback`;
 const GBP_SCOPES = "https://www.googleapis.com/auth/business.manage";
 
 let agencyGbpToken = { access_token: null, refresh_token: null, expires_at: 0 };
