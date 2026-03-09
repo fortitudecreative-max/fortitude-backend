@@ -98,6 +98,21 @@ app.post("/api/keywords/library", async (req, res) => {
   res.json({ keyword: data[0] });
 });
 
+app.post("/api/keywords/library/bulk", async (req, res) => {
+  const { keywords } = req.body; // [{ keyword, industry, volume, intent }]
+  if (!Array.isArray(keywords) || keywords.length === 0)
+    return res.status(400).json({ error: "keywords array required" });
+  const rows = keywords.map(k => ({
+    keyword: (k.keyword || "").trim(),
+    industry: k.industry || "HVAC",
+    volume: parseInt(k.volume) || 0,
+    intent: k.intent || "Transactional",
+  })).filter(k => k.keyword);
+  const { data, error } = await supabase.from("keyword_library").insert(rows).select();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ imported: data.length, keywords: data });
+});
+
 app.delete("/api/keywords/library/:id", async (req, res) => {
   const { id } = req.params;
   const { error } = await supabase.from("keyword_library").delete().eq("id", id);
