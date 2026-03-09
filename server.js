@@ -321,7 +321,7 @@ ${existingContentPrompt}
 Return your response as JSON with exactly this structure:
 {
   "title": "SEO optimized blog post title — STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
-  "metaDescription": "Meta description — STRICT Yoast limit: must be between 150-160 characters total (including spaces). Count carefully. Do not exceed 160 characters.",
+  "metaDescription": "Meta description — STRICT Yoast limit: must be between 140-156 characters total (including spaces). Count carefully. Do not exceed 156 characters.",
   "slug": "url-friendly-slug",
   "content": "Full HTML only — NO markdown whatsoever. Use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <a> tags exclusively. Never use **, --, ##, or any markdown syntax. All bullet points must be <ul><li> HTML. All bold must be <strong>. Minimum 800 words.",
   "wordCount": estimated word count as integer,
@@ -1528,7 +1528,7 @@ This protects the business's service revenue while keeping content SEO-valuable.
 
 Return ONLY valid JSON with these exact fields:
 - title: SEO title — STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
-- metaDescription: meta description — STRICT Yoast limit: 150-160 characters total including spaces. Do not exceed 160.
+- metaDescription: meta description — STRICT Yoast limit: 140-156 characters total including spaces. Do not exceed 156.
 - slug: URL slug (lowercase, hyphens)
 - content: pure HTML body using <h2>, <h3>, <p>, <ul>, <li>, <strong>, <a> tags ONLY. NO markdown whatsoever.
 - wordCount: integer word count
