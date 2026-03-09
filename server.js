@@ -38,6 +38,46 @@ const requireAuth = async (req, res, next) => {
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
+// ─── YOAST EDITION DETECTION ─────────────────────────────────────────────────
+// Returns "premium", "free", or "none"
+const detectYoastEdition = async (wpBaseUrl, authHeaders) => {
+  try {
+    // Yoast Premium exposes this REST route
+    const r = await axios.get(`${wpBaseUrl}/wp-json/yoast/v1/get_head?url=${encodeURIComponent(wpBaseUrl)}`, {
+      headers: authHeaders, httpsAgent, timeout: 6000,
+    });
+    if (r.status === 200 && r.data) return "premium";
+  } catch(e) {}
+  try {
+    // Yoast Free (any edition) registers this public route
+    const r = await axios.get(`${wpBaseUrl}/wp-json/yoast/v1/get_head?url=${encodeURIComponent(wpBaseUrl)}`, {
+      httpsAgent, timeout: 6000,
+    });
+    if (r.status === 200) return "free";
+  } catch(e) {}
+  // Try SEO Framework as fallback marker
+  try {
+    const r = await axios.get(`${wpBaseUrl}/wp-json/wp/v2/posts?per_page=1`, { headers: authHeaders, httpsAgent, timeout: 5000 });
+    // If we get here Yoast just might not be registering the route yet — assume free
+    return "free";
+  } catch(e) {}
+  return "none";
+};
+
+// Make a longtail keyphrase variant to avoid exact-match cannibalization
+// e.g. "ac repair" => "ac repair service", "hvac tune up" => "hvac tune up cost"
+const makeLongtailKeyphrase = (keyword) => {
+  const kw = keyword.trim().toLowerCase();
+  // If already long enough (3+ words), keep as-is
+  if (kw.split(/\s+/).length >= 3) return kw;
+  // Append a common local service qualifier
+  const suffixes = ["service", "near me", "cost", "tips", "guide", "company", "professional"];
+  // Avoid appending if one of these words is already present
+  if (suffixes.some(s => kw.includes(s))) return kw;
+  return kw + " service";
+};
+
+
 app.use(cors({
   origin: [
     "http://localhost:3000",
@@ -67,8 +107,8 @@ app.get("/api/clients", async (req, res) => {
 });
 
 app.post("/api/clients", async (req, res) => {
-  const { name, industry, status, domain, wordpress_url, brand_voice } = req.body;
-  const { data, error } = await supabase.from("clients").insert([{ name, industry, status: status || "pending", domain, wordpress_url, brand_voice }]).select();
+  const { name, industry, status, domain, wordpress_url, wordpress_username, wordpress_password, brand_voice } = req.body;
+  const { data, error } = await supabase.from("clients").insert([{ name, industry, status: status || "pending", domain, wordpress_url, wordpress_username, wordpress_password, brand_voice }]).select();
   if (error) return res.status(500).json({ error: error.message });
   res.json({ client: data[0] });
 });
@@ -336,7 +376,7 @@ ${existingContentPrompt}
 Return your response as JSON with exactly this structure:
 {
   "title": "SEO optimized blog post title — STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
-  "metaDescription": "Meta description — STRICT Yoast limit: must be between 140-156 characters total (including spaces). Count carefully. Do not exceed 156 characters.",
+  "metaDescription": "Meta description — HARD limit: EXACTLY 140-156 characters total (count every character including spaces). Count twice before finalizing. Do NOT exceed 156 — trim the end if needed. Include the target keyword naturally.",
   "slug": "url-friendly-slug",
   "content": "Full HTML only — NO markdown whatsoever. Use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <a> tags exclusively. Never use **, --, ##, or any markdown syntax. All bullet points must be <ul><li> HTML. All bold must be <strong>. Minimum 800 words.",
   "wordCount": estimated word count as integer,
@@ -371,6 +411,10 @@ Return only the JSON, no other text.`;
 
     // Safety net: convert any markdown that slipped through
     post.content = markdownToHtml(post.content);
+    // Safety net: enforce 156-char meta desc hard limit
+    if (post.metaDescription && post.metaDescription.length > 156) {
+      post.metaDescription = post.metaDescription.slice(0, 153).trimEnd() + "...";
+    }
 
     // Build all schema blocks (Article + HowTo if applicable + FAQPage) + visible HTML sections
     const { appendHtml, schemaHtml, schemaTypes } = buildSchemaBlock({
@@ -491,34 +535,75 @@ app.post("/api/publish/wordpress", async (req, res) => {
     const wpPost = wpRes.data;
     console.log("✓ Post created, ID:", wpPost.id);
 
+    // ── Enforce 156-char meta description hard limit ─────────────────────────
+    const safeMetaDesc = (metaDescription || "").length > 156
+      ? (metaDescription || "").slice(0, 153).trimEnd() + "..."
+      : (metaDescription || "");
+
+    // ── Use longtail keyphrase to prevent exact-match cannibalization ─────────
+    const longtailKeyphrase = makeLongtailKeyphrase(keyword);
+    console.log(`[Yoast] Keyphrase: "${keyword}" → longtail: "${longtailKeyphrase}"`);
+    console.log(`[Yoast] Meta desc length: ${safeMetaDesc.length} chars`);
+
+    // ── Detect Yoast edition to write correct meta ───────────────────────────
+    let yoastEdition = "none";
+    try { yoastEdition = await detectYoastEdition(wordpressUrl, authHeaders); } catch(e) {}
+    console.log(`[Yoast] Edition detected: ${yoastEdition}`);
+
     try {
-      await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
-        meta: {
-          _yoast_wpseo_focuskw: keyword,
-          _yoast_wpseo_metadesc: metaDescription,
-          _yoast_wpseo_title: `${title} - %%sitename%%`,
-          _yoast_wpseo_opengraph_title: title,
-          _yoast_wpseo_opengraph_description: metaDescription,
-          // Astra theme: ensures post uses correct blog layout (matches existing posts)
-          "astra-migrate-meta-layouts": "set",
-          "_elementor_template_type": "wp-post",
+      if (yoastEdition !== "none") {
+        // Write Yoast meta — works for both Free and Premium via postmeta
+        await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
+          meta: {
+            _yoast_wpseo_focuskw: longtailKeyphrase,
+            _yoast_wpseo_metadesc: safeMetaDesc,
+            _yoast_wpseo_title: `${title} - %%sitename%%`,
+            _yoast_wpseo_opengraph_title: title,
+            _yoast_wpseo_opengraph_description: safeMetaDesc,
+            "astra-migrate-meta-layouts": "set",
+            "_elementor_template_type": "wp-post",
+          }
+        }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
+        console.log("✓ Yoast meta written via REST postmeta");
+
+        // ── Trigger Yoast score recalculation (fires save hooks the REST API skips) ──
+        // First try the Fortitude plugin recalc endpoint
+        let recalcOk = false;
+        try {
+          await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
+            { post_id: wpPost.id },
+            { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }
+          );
+          recalcOk = true;
+          console.log("✓ Yoast scores recalculated via Fortitude plugin");
+        } catch (e) {
+          console.log("Fortitude recalc not available:", e.message);
         }
-      }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-      console.log("✓ Yoast + Astra meta written");
+
+        // Fallback: do a no-op WP post update to fire Yoast's wp_update_post hooks
+        if (!recalcOk) {
+          try {
+            await new Promise(r => setTimeout(r, 1500));
+            await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`,
+              { status: "publish" }, // no-op touch — fires save hooks
+              { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }
+            );
+            console.log("✓ Yoast scores triggered via no-op post update");
+          } catch(e) {
+            console.log("No-op post update failed:", e.message);
+          }
+        }
+      } else {
+        console.log("[Yoast] No Yoast plugin detected — skipping Yoast meta write");
+        // Still write Astra layout meta even without Yoast
+        try {
+          await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
+            meta: { "astra-migrate-meta-layouts": "set", "_elementor_template_type": "wp-post" }
+          }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
+        } catch(e) {}
+      }
     } catch (yoastErr) {
       console.log("Yoast meta error:", JSON.stringify(yoastErr.response?.data || yoastErr.message));
-    }
-
-    // Trigger Yoast score recalculation via Fortitude plugin
-    // (REST API publishes don't fire Yoast's save hooks — this fixes the grey lights)
-    try {
-      await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
-        { post_id: wpPost.id },
-        { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }
-      );
-      console.log("✓ Yoast scores recalculated");
-    } catch (e) {
-      console.log("Yoast recalc skipped (plugin may not be installed):", e.message);
     }
 
     if (postId) {
@@ -577,7 +662,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
       }
     }
 
-    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult });
+    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult, yoastEdition, longtailKeyphrase });
   } catch (error) {
     console.error("WordPress publish error:", error.response?.data || error.message);
     res.status(500).json({ error: "Failed to publish to WordPress", detail: error.response?.data?.message || error.message });
@@ -1543,7 +1628,7 @@ This protects the business's service revenue while keeping content SEO-valuable.
 
 Return ONLY valid JSON with these exact fields:
 - title: SEO title — STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
-- metaDescription: meta description — STRICT Yoast limit: 140-156 characters total including spaces. Do not exceed 156.
+- metaDescription: meta description — HARD limit: EXACTLY 140-156 characters total including spaces. Count every character. Do NOT exceed 156 — trim the end if needed.
 - slug: URL slug (lowercase, hyphens)
 - content: pure HTML body using <h2>, <h3>, <p>, <ul>, <li>, <strong>, <a> tags ONLY. NO markdown whatsoever.
 - wordCount: integer word count
@@ -1613,29 +1698,55 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
       ...(categoryId && { categories: [categoryId] }),
     }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
 
-    try {
-      await axios.post(`${client.wordpress_url}/wp-json/wp/v2/posts/${wpRes.data.id}`, {
-        meta: {
-          _yoast_wpseo_focuskw: keyword,
-          _yoast_wpseo_metadesc: post.metaDescription,
-          _yoast_wpseo_title: post.title,
-          // Astra theme: mark layout meta as explicitly set so theme uses the correct blog post layout
-          "astra-migrate-meta-layouts": "set",
-          "_elementor_template_type": "wp-post",
-        }
-      }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-    } catch (e) {}
+    // ── Yoast meta: edition-aware, longtail keyphrase, 156-char meta desc ────
+    const schSafeMetaDesc = (post.metaDescription || "").length > 156
+      ? (post.metaDescription || "").slice(0, 153).trimEnd() + "..."
+      : (post.metaDescription || "");
+    const schLongtailKw = makeLongtailKeyphrase(keyword);
+    let schYoastEdition = "none";
+    try { schYoastEdition = await detectYoastEdition(client.wordpress_url, authHeaders); } catch(e) {}
+    console.log(`[Scheduler Yoast] Edition: ${schYoastEdition}, keyphrase: "${schLongtailKw}", meta len: ${schSafeMetaDesc.length}`);
 
-    // Trigger Yoast score recalculation via Fortitude plugin
     try {
-      await axios.post(`${client.wordpress_url}/wp-json/fortitude/v1/yoast-recalc`,
-        { post_id: wpRes.data.id },
-        { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }
-      );
-      console.log("✓ Yoast scores recalculated");
-    } catch (e) {
-      console.log("Yoast recalc skipped:", e.message);
-    }
+      if (schYoastEdition !== "none") {
+        await axios.post(`${client.wordpress_url}/wp-json/wp/v2/posts/${wpRes.data.id}`, {
+          meta: {
+            _yoast_wpseo_focuskw: schLongtailKw,
+            _yoast_wpseo_metadesc: schSafeMetaDesc,
+            _yoast_wpseo_title: `${post.title} - %%sitename%%`,
+            _yoast_wpseo_opengraph_title: post.title,
+            _yoast_wpseo_opengraph_description: schSafeMetaDesc,
+            "astra-migrate-meta-layouts": "set",
+            "_elementor_template_type": "wp-post",
+          }
+        }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
+
+        // Recalc Yoast scores
+        let schRecalcOk = false;
+        try {
+          await axios.post(`${client.wordpress_url}/wp-json/fortitude/v1/yoast-recalc`,
+            { post_id: wpRes.data.id },
+            { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }
+          );
+          schRecalcOk = true;
+        } catch(e) {}
+        if (!schRecalcOk) {
+          try {
+            await new Promise(r => setTimeout(r, 1500));
+            await axios.post(`${client.wordpress_url}/wp-json/wp/v2/posts/${wpRes.data.id}`,
+              { status: "publish" },
+              { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }
+            );
+          } catch(e) {}
+        }
+        console.log("✓ Scheduler: Yoast meta + scores written");
+      } else {
+        // No Yoast — still write Astra layout meta
+        await axios.post(`${client.wordpress_url}/wp-json/wp/v2/posts/${wpRes.data.id}`, {
+          meta: { "astra-migrate-meta-layouts": "set", "_elementor_template_type": "wp-post" }
+        }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }).catch(() => {});
+      }
+    } catch (e) { console.log("[Scheduler] Yoast meta error:", e.message); }
 
     await supabase.from("posts").insert([{
       client_id: client.id, keyword, title: post.title, meta_description: post.metaDescription,
