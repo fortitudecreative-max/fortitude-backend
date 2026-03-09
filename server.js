@@ -43,19 +43,20 @@ const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const detectSeoCapabilities = async (wpBaseUrl, authHeaders) => {
   const result = { yoast: "none", fortitudePlugin: false, canWriteSeoMeta: false };
 
-  // 1. Check if Fortitude SEO meta writer plugin is installed (most reliable write path)
+  // 1. Detect Fortitude plugin via WP REST namespace list — most reliable method.
+  //    The namespace "fortitude/v1" only appears if the plugin is active.
+  //    Previously used post_id:0 probe which returned 404 (same as not-installed).
   try {
-    const r = await axios.post(`${wpBaseUrl}/wp-json/fortitude/v1/seo-meta`,
-      { post_id: 0, _probe: true }, // send invalid post_id — plugin will 400 but we know it's there
+    const nsResp = await axios.get(`${wpBaseUrl}/wp-json/`,
       { headers: authHeaders, httpsAgent, timeout: 6000 }
     );
-    result.fortitudePlugin = true;
-  } catch(e) {
-    // 404 = not installed; 400/422 = installed but rejected invalid post_id (that's fine)
-    if (e.response?.status === 400 || e.response?.status === 422 || e.response?.status === 200) {
+    const namespaces = nsResp.data?.namespaces || [];
+    if (namespaces.includes('fortitude/v1')) {
       result.fortitudePlugin = true;
+      console.log('[Yoast] Fortitude plugin confirmed via namespace');
     }
-    // 404 = definitely not installed
+  } catch(e) {
+    console.log('[Yoast] Namespace check failed:', e.message);
   }
 
   // 2. Check for Yoast Free or Premium via their REST namespace
