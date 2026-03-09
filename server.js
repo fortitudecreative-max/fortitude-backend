@@ -764,13 +764,12 @@ app.post("/api/yoast-optimize", async (req, res) => {
     if (!client?.wordpress_url) return res.status(404).json({ error: "Client or WP URL not found" });
 
     const wordpressUrl = client.wordpress_url.replace(/\/$/, "");
-    const wpUser = await supabase.rpc ? null : null;
-    const decryptedUser = (await supabase.rpc("decrypt_field", { encrypted_value: client.wordpress_username }))?.data;
-    const decryptedPass = (await supabase.rpc("decrypt_field", { encrypted_value: client.wordpress_password }))?.data;
-    if (!decryptedUser || !decryptedPass) return res.status(400).json({ error: "WordPress credentials not set for this client" });
+    const wpUser = client.wordpress_username;
+    const wpPass = client.wordpress_password;
+    if (!wpUser || !wpPass) return res.status(400).json({ error: "WordPress credentials not set for this client — re-enter them via Edit Client" });
 
     const authHeaders = {
-      "Authorization": "Basic " + Buffer.from(`${decryptedUser}:${decryptedPass}`).toString("base64"),
+      "Authorization": "Basic " + Buffer.from(`${wpUser}:${wpPass}`).toString("base64"),
       "Content-Type": "application/json",
     };
 
