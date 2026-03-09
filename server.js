@@ -673,6 +673,22 @@ app.post("/api/publish/wordpress", async (req, res) => {
       await supabase.from("clients").update({ posts_published: (client?.posts_published || 0) + 1 }).eq("id", clientId);
     }
 
+    // ── Yoast optimization loop (density, title, H2s, meta length) ───────────
+    let yoastOptResult = null;
+    if (wpPost.link && seoCaps.canWriteSeoMeta) {
+      try {
+        yoastOptResult = await runYoastOptimizeLoop(
+          wpPost.id,
+          { title, keyword, metaDescription: safeMetaDesc },
+          wordpressUrl,
+          { ...authHeaders, "Content-Type": "application/json" },
+          seoCaps
+        );
+      } catch(e) {
+        console.error("[YoastOpt] Loop threw:", e.message);
+      }
+    }
+
     // ── Post-publish QA + auto-repair loop ────────────────────────────────
     let qa = null;
     let repairHistory = [];
@@ -721,7 +737,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
       }
     }
 
-    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta });
+    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta, yoastOpt: yoastOptResult });
   } catch (error) {
     console.error("WordPress publish error:", error.response?.data || error.message);
     res.status(500).json({ error: "Failed to publish to WordPress", detail: error.response?.data?.message || error.message });
@@ -1474,6 +1490,171 @@ Return ONLY the JSON, nothing else.` }]
 // 3. Repeat up to MAX_REPAIR_CYCLES. Return final QA + full repair history.
 
 const MAX_REPAIR_CYCLES = 3;
+
+// ─── YOAST OPTIMIZATION LOOP ─────────────────────────────────────────────────
+// Runs up to 3 passes after publish. Each pass checks 4 Yoast problems:
+//   - Keyphrase density (too low)        → AI content rewrite
+//   - Keyphrase not in SEO title         → AI title rewrite via Fortitude plugin
+//   - Keyphrase missing from H2/H3s      → AI content rewrite
+//   - Meta description over 156 chars   → AI meta rewrite via Fortitude plugin
+// ─────────────────────────────────────────────────────────────────────────────
+const YOAST_MAX_PASSES = 3;
+
+const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription }, wpBaseUrl, authHeaders, seoCaps) => {
+  const log = (msg) => console.log(`[YoastOpt] ${msg}`);
+  const fixes = [];
+  let currentTitle   = title;
+  let currentMeta    = metaDescription;
+  let currentContent = "";
+
+  // ── Check Yoast issues against current state ──────────────────────────────
+  const checkIssues = (html, ttl, meta, kw) => {
+    const issues = [];
+    const kwLower   = kw.toLowerCase();
+    const kwWords   = kwLower.split(/\s+/);
+    const textOnly  = html.replace(/<[^>]+>/g, " ").toLowerCase();
+    const wordCount = textOnly.split(/\s+/).filter(Boolean).length;
+
+    // Keyphrase density
+    let kwCount = 0, pos = 0;
+    while ((pos = textOnly.indexOf(kwLower, pos)) !== -1) { kwCount++; pos += kwLower.length; }
+    const minOccurrences = Math.max(5, Math.floor(wordCount / 300));
+    if (kwCount < minOccurrences) issues.push({ type: "density", kwCount, minOccurrences, wordCount });
+
+    // Keyphrase in SEO title
+    const titleLower    = ttl.replace(/ - %%sitename%%/, "").toLowerCase();
+    const missingInTitle = kwWords.filter(w => !titleLower.includes(w));
+    if (missingInTitle.length > 0) issues.push({ type: "title", missingWords: missingInTitle });
+
+    // Keyphrase in H2/H3 subheadings
+    const headings = [...html.matchAll(/<h[23][^>]*>(.*?)<\/h[23]>/gi)].map(m => m[1].replace(/<[^>]+>/g, "").toLowerCase());
+    const hasKwInHeading = headings.some(h => kwWords.some(w => h.includes(w)));
+    if (!hasKwInHeading) issues.push({ type: "subheadings", headings: headings.slice(0, 6) });
+
+    // Meta description length
+    if (meta.length > 156) issues.push({ type: "meta_length", length: meta.length });
+
+    return issues;
+  };
+
+  // ── Write Yoast meta fields via Fortitude plugin or REST ──────────────────
+  const writeMeta = async (fields) => {
+    if (seoCaps.fortitudePlugin) {
+      try {
+        const r = await axios.post(`${wpBaseUrl}/wp-json/fortitude/v1/seo-meta`,
+          { post_id: wpPostId, ...fields }, { headers: authHeaders, httpsAgent });
+        if (r.data?.success) return true;
+      } catch(e) { log(`Fortitude meta write failed: ${e.message}`); }
+    }
+    const metaPayload = {};
+    if (fields.focuskw  !== undefined) metaPayload._yoast_wpseo_focuskw  = fields.focuskw;
+    if (fields.metadesc !== undefined) metaPayload._yoast_wpseo_metadesc = fields.metadesc;
+    if (fields.title    !== undefined) metaPayload._yoast_wpseo_title    = fields.title;
+    try {
+      await axios.post(`${wpBaseUrl}/wp-json/wp/v2/posts/${wpPostId}`,
+        { meta: metaPayload }, { headers: authHeaders, httpsAgent });
+      return true;
+    } catch(e) { log(`REST meta write failed: ${e.message}`); return false; }
+  };
+
+  // ── Fetch and write post HTML via WP REST ─────────────────────────────────
+  const getPostHtml = async () => {
+    const r = await axios.get(`${wpBaseUrl}/wp-json/wp/v2/posts/${wpPostId}?context=edit`, { headers: authHeaders, httpsAgent });
+    return r.data?.content?.raw || "";
+  };
+  const writePostHtml = async (html) => {
+    await axios.post(`${wpBaseUrl}/wp-json/wp/v2/posts/${wpPostId}`,
+      { content: html, status: "publish" }, { headers: authHeaders, httpsAgent });
+  };
+
+  log(`Starting — post ${wpPostId}, keyphrase: "${keyword}"`);
+  try { currentContent = await getPostHtml(); }
+  catch(e) { log(`Could not fetch post: ${e.message}`); return { yoastScore: null, passes: 0, issues: [], fixes }; }
+
+  for (let pass = 1; pass <= YOAST_MAX_PASSES; pass++) {
+    const issues = checkIssues(currentContent, currentTitle, currentMeta, keyword);
+    log(`Pass ${pass}/${YOAST_MAX_PASSES} — issues: ${issues.map(i => i.type).join(", ") || "none ✓"}`);
+    if (issues.length === 0) { log(`✓ All Yoast checks passed`); break; }
+
+    let metaChanged = false, contentChanged = false;
+
+    // Fix: meta description too long
+    const metaIssue = issues.find(i => i.type === "meta_length");
+    if (metaIssue) {
+      try {
+        const msg = await anthropic.messages.create({
+          model: "claude-sonnet-4-20250514", max_tokens: 300,
+          messages: [{ role: "user", content: `Rewrite this meta description to be UNDER 156 characters while keeping the keyphrase "${keyword}" and the same meaning. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"` }]
+        });
+        const newMeta = msg.content[0].text.trim().replace(/^["']|["']$/g, "");
+        if (newMeta.length >= 80 && newMeta.length <= 156) {
+          currentMeta = newMeta; metaChanged = true;
+          fixes.push({ pass, type: "meta_length", fix: `Trimmed to ${newMeta.length} chars` });
+          log(`Fixed meta: ${newMeta.length} chars`);
+        }
+      } catch(e) { log(`Meta rewrite failed: ${e.message}`); }
+    }
+
+    // Fix: keyphrase not in SEO title
+    const titleIssue = issues.find(i => i.type === "title");
+    if (titleIssue) {
+      try {
+        const msg = await anthropic.messages.create({
+          model: "claude-sonnet-4-20250514", max_tokens: 200,
+          messages: [{ role: "user", content: `Rewrite this SEO title so it STARTS WITH the exact keyphrase "${keyword}". Keep the post topic clear. Max 60 characters (not counting the site name suffix). Return ONLY the title text, no suffix, no quotes.\n\nCurrent title: "${currentTitle.replace(/ - %%sitename%%/, "")}"` }]
+        });
+        const newTitle = msg.content[0].text.trim().replace(/^["']|["']$/g, "").replace(/ - %%sitename%%$/, "") + " - %%sitename%%";
+        currentTitle = newTitle; metaChanged = true;
+        fixes.push({ pass, type: "title", fix: `Rewritten to start with keyphrase` });
+        log(`Fixed title: "${newTitle}"`);
+      } catch(e) { log(`Title rewrite failed: ${e.message}`); }
+    }
+
+    if (metaChanged) {
+      await writeMeta({ metadesc: currentMeta, title: currentTitle, focuskw: keyword });
+      log(`Meta/title written to WP`);
+    }
+
+    // Fix: keyphrase density + subheadings (content rewrite)
+    const needsContentFix = issues.some(i => i.type === "density" || i.type === "subheadings");
+    if (needsContentFix) {
+      const densityIssue  = issues.find(i => i.type === "density");
+      const headingIssue  = issues.find(i => i.type === "subheadings");
+      const contentFixList = [];
+      if (densityIssue) contentFixList.push(`Keyphrase density too low: found "${keyword}" only ${densityIssue.kwCount} times, need at least ${densityIssue.minOccurrences}. Naturally weave the exact phrase into more paragraphs throughout the post — do not force it awkwardly.`);
+      if (headingIssue) contentFixList.push(`Keyphrase missing from H2/H3 subheadings. Rewrite at least 2 headings to include "${keyword}" or a close synonym. Current headings: ${headingIssue.headings.join(" | ")}`);
+
+      try {
+        const schemaMatch = currentContent.match(/(<script type="application\/ld\+json">[\s\S]*?<\/script>\s*)+$/i);
+        const schemaBlock = schemaMatch ? schemaMatch[0] : "";
+        const bodyHtml    = schemaMatch ? currentContent.slice(0, schemaMatch.index) : currentContent;
+
+        const msg = await anthropic.messages.create({
+          model: "claude-sonnet-4-20250514", max_tokens: 6000,
+          system: `You are an expert SEO blog editor. Fix ONLY the listed Yoast SEO issues. Preserve all existing links, images, and post structure. Output ONLY the corrected HTML body content — no preamble, no markdown, no explanation.`,
+          messages: [{ role: "user", content: `Fix these Yoast SEO issues:\n\n${contentFixList.join("\n\n")}\n\nPost keyword: "${keyword}"\n\nCurrent HTML:\n---\n${bodyHtml.slice(0, 24000)}\n---\n\nReturn ONLY the corrected HTML body.` }]
+        });
+        let rewritten = msg.content[0].text.trim().replace(/^```html?\n?/i, "").replace(/```$/m, "").trim();
+        if (schemaBlock) rewritten = rewritten + "\n" + schemaBlock;
+        currentContent = rewritten; contentChanged = true;
+        fixes.push({ pass, type: [densityIssue && "density", headingIssue && "subheadings"].filter(Boolean).join("+"), fix: "AI content rewrite" });
+        log(`Content rewritten`);
+      } catch(e) { log(`Content rewrite failed: ${e.message}`); }
+
+      if (contentChanged) {
+        try { await writePostHtml(currentContent); log(`Content written to WP`); }
+        catch(e) { log(`Content write failed: ${e.message}`); }
+      }
+    }
+
+    if (!metaChanged && !contentChanged) { log(`No fixes applied on pass ${pass}, stopping`); break; }
+  }
+
+  const finalIssues  = checkIssues(currentContent, currentTitle, currentMeta, keyword);
+  const yoastScore   = Math.max(0, 100 - (finalIssues.length * 20));
+  log(`Done. Final issues: ${finalIssues.length}, score: ~${yoastScore}. Total fixes: ${fixes.length}`);
+  return { yoastScore, passes: fixes.length, issues: finalIssues, fixes, finalTitle: currentTitle, finalMeta: currentMeta };
+};
 
 const qaRepairLoop = async (wpPostId, liveUrl, qaContext, wpBaseUrl, authHeaders) => {
   const { title, keyword, metaDescription } = qaContext;
