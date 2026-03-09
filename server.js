@@ -744,7 +744,49 @@ app.post("/api/publish/wordpress", async (req, res) => {
   }
 });
 
-// ─── SEMRUSH KEYWORD GAP ─────────────────────────────────────────
+// ─── MANUAL YOAST OPTIMIZE ENDPOINT ──────────────────────────────────────────
+// Called by the "Re-run Yoast Fix" button in the publish banner.
+// Accepts { clientId, wpPostId, title, keyword, metaDescription }
+// ─────────────────────────────────────────────────────────────────────────────
+app.post("/api/yoast-optimize", async (req, res) => {
+  const { clientId, wpPostId, title, keyword, metaDescription } = req.body;
+  if (!clientId || !wpPostId || !keyword) {
+    return res.status(400).json({ error: "clientId, wpPostId, and keyword are required" });
+  }
+  try {
+    const { data: client } = await supabase.from("clients").select("*").eq("id", clientId).single();
+    if (!client?.wordpress_url) return res.status(404).json({ error: "Client or WP URL not found" });
+
+    const wordpressUrl = client.wordpress_url.replace(/\/$/, "");
+    const wpUser = await supabase.rpc ? null : null;
+    const decryptedUser = (await supabase.rpc("decrypt_field", { encrypted_value: client.wordpress_username }))?.data;
+    const decryptedPass = (await supabase.rpc("decrypt_field", { encrypted_value: client.wordpress_password }))?.data;
+    if (!decryptedUser || !decryptedPass) return res.status(400).json({ error: "WordPress credentials not set for this client" });
+
+    const authHeaders = {
+      "Authorization": "Basic " + Buffer.from(`${decryptedUser}:${decryptedPass}`).toString("base64"),
+      "Content-Type": "application/json",
+    };
+
+    const seoCaps = await detectSeoCapabilities(wordpressUrl, authHeaders);
+    console.log(`[YoastOpt/Manual] Client: ${client.name}, post: ${wpPostId}, caps:`, seoCaps);
+
+    const result = await runYoastOptimizeLoop(
+      parseInt(wpPostId),
+      { title: title || "", keyword, metaDescription: metaDescription || "" },
+      wordpressUrl,
+      authHeaders,
+      seoCaps
+    );
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("[YoastOpt/Manual] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.get("/api/keywords/gap", async (req, res) => {
   const { domain, competitor1, competitor2, database = "us" } = req.query;
   if (!domain || !competitor1) return res.status(400).json({ error: "domain and competitor1 are required" });
@@ -1498,7 +1540,7 @@ const MAX_REPAIR_CYCLES = 3;
 //   - Keyphrase missing from H2/H3s      → AI content rewrite
 //   - Meta description over 156 chars   → AI meta rewrite via Fortitude plugin
 // ─────────────────────────────────────────────────────────────────────────────
-const YOAST_MAX_PASSES = 3;
+const YOAST_MAX_PASSES = 5;
 
 const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription }, wpBaseUrl, authHeaders, seoCaps) => {
   const log = (msg) => console.log(`[YoastOpt] ${msg}`);
