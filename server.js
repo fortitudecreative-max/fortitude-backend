@@ -266,16 +266,23 @@ app.post("/api/content/generate", async (req, res) => {
     const Anthropic = require("@anthropic-ai/sdk");
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
+    const blogPosts = internalPages.filter(p => p.type === "post");
+    const servicePages = internalPages.filter(p => p.type === "page" && !/home|homepage/i.test(p.title));
+    const contactPage = internalPages.find(p => /contact|get.a.quote|free.estimate|schedule|book/i.test(p.title));
     const internalLinksPrompt = internalPages.length > 0
-      ? `\n\nINTERNAL LINKS — TOPIC CLUSTER LINKING RULES:
-Available internal pages and previously published blog posts to link to:
-${internalPages.map(p => `- ${p.title}: ${p.url}`).join("\n")}
-Linking rules:
-1. Prioritize linking to PREVIOUSLY PUBLISHED BLOG POSTS (not just service pages) to build topic clusters. This helps search engines understand content relationships.
-2. Only link when the topic is genuinely related — use contextual anchor text that describes the destination page's content.
-3. KEYWORD CANNIBALIZATION: Do NOT link to any page that targets the exact same keyword or intent as this post. If a page would compete with this post in search results for the same query, skip it. Instead, link to complementary topics (e.g., a post about "AC repair" could link to "signs your AC needs maintenance" but NOT to another "AC repair" post).
-4. If no previously published blog posts exist yet, only link to relevant service pages. Do not force internal links if no relevant pages exist — 0 internal links is better than irrelevant ones.
-5. Include 2-3 internal links if relevant pages exist; fewer or none if they don't.`
+      ? `\n\nINTERNAL LINKS — TOPIC CLUSTER STRUCTURE (Required):
+Available published blog posts:
+${blogPosts.map(p => `  [BLOG] ${p.title}: ${p.url}`).join("\n") || "  (none yet — use service pages only)"}
+Available service/other pages (excluding homepage):
+${servicePages.map(p => `  [PAGE] ${p.title}: ${p.url}`).join("\n") || "  (none available)"}
+${contactPage ? `Contact/quote page: [CONTACT] ${contactPage.title}: ${contactPage.url}` : ""}
+
+Internal linking rules — follow this structure:
+1. Up to 3 BLOG POSTS: Link to up to 3 previously published blog posts on complementary topics to build a topic cluster. Only link to a blog post if it is on a meaningfully different topic that complements this post — NEVER link to a post that targets the same or overlapping keyword (keyword cannibalization).
+2. 1 SERVICE PAGE: Link once to the most relevant service page (e.g. AC Repair, Plumbing Services). Do not link to the homepage — only to a specific service or category page.
+3. 1 CONTACT/QUOTE PAGE: Include exactly one link to the contact, get-a-quote, or scheduling page as a call-to-action (e.g. "contact us today", "schedule a free estimate").
+4. If no blog posts exist yet, use 2 service pages + 1 contact page. Do not force links to irrelevant pages.
+5. Never link to the homepage.`
       : "";
 
     const externalLinksPrompt = `\n\nEXTERNAL LINKS — OUTBOUND LINKING RULES:
@@ -313,8 +320,8 @@ ${existingContentPrompt}
 
 Return your response as JSON with exactly this structure:
 {
-  "title": "SEO optimized blog post title (50-60 chars)",
-  "metaDescription": "150-160 character meta description",
+  "title": "SEO optimized blog post title — STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
+  "metaDescription": "Meta description — STRICT Yoast limit: must be between 150-160 characters total (including spaces). Count carefully. Do not exceed 160 characters.",
   "slug": "url-friendly-slug",
   "content": "Full HTML only — NO markdown whatsoever. Use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <a> tags exclusively. Never use **, --, ##, or any markdown syntax. All bullet points must be <ul><li> HTML. All bold must be <strong>. Minimum 800 words.",
   "wordCount": estimated word count as integer,
@@ -1083,7 +1090,7 @@ function buildSchemaBlock(opts) {
 </div>`;
   }
 
-  // ── 3. FAQPage schema + visible section ───────────────────────
+  // ── 3. FAQPage schema + sc_fs_multi_faq shortcode ───────────────
   let faqHtml = "";
   if (faqs && faqs.length > 0) {
     const faqSchema = {
@@ -1097,17 +1104,11 @@ function buildSchemaBlock(opts) {
     };
     schemas.push(faqSchema);
 
-    const faqItemsHtml = faqs.map(f => `
-  <div class="faq-item" style="margin-bottom:20px;padding-bottom:20px;border-bottom:1px solid #f0f0f0;">
-    <h3 style="margin-bottom:6px;font-size:17px;">${f.question}</h3>
-    <p style="margin:0;color:#444;">${f.answer}</p>
-  </div>`).join("");
+    // Build [sc_fs_multi_faq] shortcode (renders FAQ accordion + triggers Yoast FAQ schema)
+    const shortcodeAttrs = faqs.map((f, i) => `headline-${i}="h3" question-${i}="${f.question.replace(/"/g, "'")}" answer-${i}="${f.answer.replace(/"/g, "'")}" image-${i}=""`).join(" ");
+    const shortcode = `[sc_fs_multi_faq ${shortcodeAttrs} count="${faqs.length}" html="true" css_class=""]`;
 
-    faqHtml = `
-<div class="faq-section" style="margin-top:40px;padding-top:24px;border-top:2px solid #eee;">
-  <h2>Frequently Asked Questions</h2>
-  ${faqItemsHtml}
-</div>`;
+    faqHtml = `\n<div class="faq-section">\n<h2>Frequently Asked Questions</h2>\n${shortcode}\n</div>`;
   }
 
   // ── 4. Combined JSON-LD injection ─────────────────────────────
@@ -1488,8 +1489,11 @@ const publishPostForClient = async (client, keyword) => {
       featuredImage = selectFeaturedImage(clientImages, keywordWords);
     }
 
+    const blogPosts = internalPages.filter(p => p.type === "post");
+    const servicePages = internalPages.filter(p => p.type === "page" && !/home|homepage/i.test(p.title));
+    const contactPage = internalPages.find(p => /contact|get.a.quote|free.estimate|schedule|book/i.test(p.title));
     const internalLinksPrompt = internalPages.length > 0
-      ? ("\n\nINTERNAL LINKS — TOPIC CLUSTER LINKING RULES:\nAvailable internal pages and previously published blog posts to link to:\n" + internalPages.map(p => "- " + p.title + ": " + p.url).join("\n") + "\nLinking rules:\n1. Prioritize linking to PREVIOUSLY PUBLISHED BLOG POSTS to build topic clusters.\n2. Only link when the topic is genuinely related — use contextual anchor text.\n3. KEYWORD CANNIBALIZATION: Do NOT link to any page targeting the same keyword or intent as this post. Link to complementary topics only.\n4. If no relevant pages exist, do not force internal links — 0 internal links beats irrelevant ones.\n5. Include 2-3 internal links if relevant pages exist; fewer or none if they don't.")
+      ? ("\n\nINTERNAL LINKS — TOPIC CLUSTER STRUCTURE (Required):\nAvailable published blog posts:\n" + (blogPosts.map(p => "  [BLOG] " + p.title + ": " + p.url).join("\n") || "  (none yet — use service pages only)") + "\nAvailable service/other pages (excluding homepage):\n" + (servicePages.map(p => "  [PAGE] " + p.title + ": " + p.url).join("\n") || "  (none available)") + (contactPage ? "\nContact/quote page: [CONTACT] " + contactPage.title + ": " + contactPage.url : "") + "\n\nInternal linking rules — follow this structure:\n1. Up to 3 BLOG POSTS: Link to up to 3 previously published blog posts on complementary topics. NEVER link to a post targeting the same or overlapping keyword (keyword cannibalization).\n2. 1 SERVICE PAGE: Link once to the most relevant service page. Never link to the homepage.\n3. 1 CONTACT/QUOTE PAGE: Include one link to the contact or scheduling page as a call-to-action.\n4. If no blog posts exist yet, use 2 service pages + 1 contact page.\n5. Never link to the homepage.")
       : "";
 
     const externalLinksPrompt = `
@@ -1523,8 +1527,8 @@ This protects the business's service revenue while keeping content SEO-valuable.
       messages: [{ role: "user", content: `Write a complete SEO blog post for "${client.name}" targeting: "${keyword}"${internalLinksPrompt}${externalLinksPrompt}${existingContentPrompt}
 
 Return ONLY valid JSON with these exact fields:
-- title: SEO title (50-60 chars)
-- metaDescription: meta description (150-160 chars)
+- title: SEO title — STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
+- metaDescription: meta description — STRICT Yoast limit: 150-160 characters total including spaces. Do not exceed 160.
 - slug: URL slug (lowercase, hyphens)
 - content: pure HTML body using <h2>, <h3>, <p>, <ul>, <li>, <strong>, <a> tags ONLY. NO markdown whatsoever.
 - wordCount: integer word count
