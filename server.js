@@ -3238,11 +3238,19 @@ app.get("/api/gbp/locations", async (req, res) => {
         (locRes.data.locations || []).forEach(loc => {
           allLocations.push({ name: loc.name, title: loc.title, accountName: account.name, address: loc.storefrontAddress?.addressLines?.[0] || "" });
         });
-      } catch (e) {}
+      } catch (e) {
+        const status = e.response?.status;
+        const msg = e.response?.data?.error?.message || e.message;
+        if (status === 429) return res.status(429).json({ error: `Google rate limit (429): ${msg}` });
+        console.error("GBP location fetch error:", msg);
+      }
     }
     res.json({ locations: allLocations });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    const status = e.response?.status;
+    const msg = e.response?.data?.error?.message || e.message;
+    if (status === 429) return res.status(429).json({ error: `Google rate limit (429): ${msg}` });
+    res.status(500).json({ error: msg });
   }
 });
 
