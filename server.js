@@ -477,7 +477,36 @@ app.post("/api/publish/wordpress", async (req, res) => {
       }
     }
 
-    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory });
+    // ── Auto-post to Google Business Profile ──────────────────────────────
+    let gbpResult = null;
+    if (clientId && wpPost.link && agencyGbpToken.refresh_token) {
+      try {
+        const { data: clientData } = await supabase.from("clients").select("gbp_location_name").eq("id", clientId).single();
+        if (clientData?.gbp_location_name) {
+          const access_token = await getAgencyAccessToken();
+          const gbpSummary = metaDescription || `${title} — read our latest post for expert tips and advice.`;
+          const gbpBody = {
+            languageCode: "en",
+            summary: gbpSummary,
+            topicType: "STANDARD",
+            callToAction: { actionType: "LEARN_MORE", url: wpPost.link },
+            ...(featuredImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: featuredImageUrl }] } : {}),
+          };
+          const gbpRes = await axios.post(
+            `https://mybusiness.googleapis.com/v4/${clientData.gbp_location_name}/localPosts`,
+            gbpBody,
+            { headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" } }
+          );
+          gbpResult = { success: true, post: gbpRes.data };
+          console.log("✓ GBP post auto-published for client", clientId);
+        }
+      } catch (gbpErr) {
+        console.error("GBP auto-post error:", gbpErr.response?.data || gbpErr.message);
+        gbpResult = { success: false, error: gbpErr.response?.data?.error?.message || gbpErr.message };
+      }
+    }
+
+    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult });
   } catch (error) {
     console.error("WordPress publish error:", error.response?.data || error.message);
     res.status(500).json({ error: "Failed to publish to WordPress", detail: error.response?.data?.message || error.message });
@@ -1531,6 +1560,29 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
         }
       } catch(e) {
         console.error("[QA] Scheduled repair loop threw:", e.message);
+      }
+    }
+
+    // ── Auto-post to Google Business Profile ──────────────────────────────
+    if (agencyGbpToken.refresh_token && client.gbp_location_name) {
+      try {
+        const access_token = await getAgencyAccessToken();
+        const gbpSummary = post.metaDescription || `${post.title} — read our latest post for expert tips and advice.`;
+        const gbpBody = {
+          languageCode: "en",
+          summary: gbpSummary,
+          topicType: "STANDARD",
+          callToAction: { actionType: "LEARN_MORE", url: liveUrl || wpRes.data.link },
+          ...(featuredImage?.storage_path ? { media: [{ mediaFormat: "PHOTO", sourceUrl: featuredImage.storage_path }] } : {}),
+        };
+        await axios.post(
+          `https://mybusiness.googleapis.com/v4/${client.gbp_location_name}/localPosts`,
+          gbpBody,
+          { headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" } }
+        );
+        console.log(`✓ GBP post auto-published for ${client.name}`);
+      } catch (gbpErr) {
+        console.error(`GBP auto-post error for ${client.name}:`, gbpErr.response?.data || gbpErr.message);
       }
     }
 
@@ -3099,7 +3151,7 @@ app.post("/api/seo/fix", async (req, res) => {
 // ─── GOOGLE BUSINESS PROFILE ─────────────────────────────────────
 const GBP_CLIENT_ID = process.env.GBP_CLIENT_ID;
 const GBP_CLIENT_SECRET = process.env.GBP_CLIENT_SECRET;
-const GBP_REDIRECT_URI = `https://fortitude-backend-production.up.railway.app/api/gbp/oauth/callback`;
+const GBP_REDIRECT_URI = `http://localhost:${PORT}/api/gbp/oauth/callback`;
 const GBP_SCOPES = "https://www.googleapis.com/auth/business.manage";
 
 let agencyGbpToken = { access_token: null, refresh_token: null, expires_at: 0 };
@@ -3223,7 +3275,7 @@ app.post("/api/gbp/disconnect/:clientId", async (req, res) => {
 
 app.post("/api/gbp/post/:clientId", async (req, res) => {
   const { clientId } = req.params;
-  const { summary, ctaUrl, ctaType = "LEARN_MORE", topicType = "STANDARD" } = req.body;
+  const { summary, ctaUrl, ctaType = "LEARN_MORE", topicType = "STANDARD", imageUrl } = req.body;
   if (!summary) return res.status(400).json({ error: "summary is required" });
   try {
     const access_token = await getAgencyAccessToken();
@@ -3235,6 +3287,7 @@ app.post("/api/gbp/post/:clientId", async (req, res) => {
       summary,
       topicType,
       ...(ctaUrl ? { callToAction: { actionType: ctaType, url: ctaUrl } } : {}),
+      ...(imageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: imageUrl }] } : {}),
     };
 
     const postRes = await axios.post(
