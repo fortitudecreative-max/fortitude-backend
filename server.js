@@ -92,8 +92,21 @@ app.get("/api/keywords/library", async (req, res) => {
 });
 
 app.post("/api/keywords/library", async (req, res) => {
-  const { keyword, industry, category, volume, intent } = req.body;
-  const { data, error } = await supabase.from("keyword_library").insert([{ keyword, industry, category, volume: parseInt(volume) || 0, intent }]).select();
+  const { keyword, industry, category, volume, kd, intent } = req.body;
+  const { data, error } = await supabase.from("keyword_library").insert([{ keyword, industry, category, volume: parseInt(volume) || 0, kd: parseInt(kd) || 0, intent }]).select();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ keyword: data[0] });
+});
+
+app.patch("/api/keywords/library/:id", async (req, res) => {
+  const { id } = req.params;
+  const { keyword, volume, kd, intent } = req.body;
+  const updates = {};
+  if (keyword !== undefined) updates.keyword = keyword;
+  if (volume !== undefined) updates.volume = parseInt(volume) || 0;
+  if (kd !== undefined) updates.kd = parseInt(kd) || 0;
+  if (intent !== undefined) updates.intent = intent;
+  const { data, error } = await supabase.from("keyword_library").update(updates).eq("id", id).select();
   if (error) return res.status(500).json({ error: error.message });
   res.json({ keyword: data[0] });
 });
@@ -106,6 +119,7 @@ app.post("/api/keywords/library/bulk", async (req, res) => {
     keyword: (k.keyword || "").trim(),
     industry: k.industry || "HVAC",
     volume: parseInt(k.volume) || 0,
+    kd: parseInt(k.kd) || 0,
     intent: k.intent || "Transactional",
   })).filter(k => k.keyword);
   const { data, error } = await supabase.from("keyword_library").insert(rows).select();
