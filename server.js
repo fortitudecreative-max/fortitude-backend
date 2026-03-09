@@ -1635,15 +1635,29 @@ const scheduleDailyPosts = async () => {
 
   if (!clients?.length) { console.log("No clients with scheduling enabled."); return; }
 
-  const today = new Date();
-  const dayName = today.toLocaleDateString("en-US", { weekday: "short" });
+  // All scheduling operates in EST (America/New_York) regardless of server timezone
+  const TZ = "America/New_York";
+  const nowUTC = new Date();
+
+  // Compute EST offset in ms (handles both EST -5 and EDT -4 automatically)
+  const estOffsetMs = nowUTC.getTime() - new Date(nowUTC.toLocaleString("en-US", { timeZone: TZ })).getTime();
+
+  // Get current date parts in EST
+  const estParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ, weekday: "short", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(nowUTC).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+
+  const dayName = estParts.weekday; // "Mon", "Tue", etc. in EST
+
+  // EST midnight as UTC for "already published today" DB query
+  const estMidnight = new Date(`${estParts.year}-${estParts.month}-${estParts.day}T00:00:00`);
+  const todayStart = new Date(estMidnight.getTime() + estOffsetMs).toISOString();
 
   for (const client of clients) {
     try {
       const scheduleDays = client.schedule_days || ["Mon","Tue","Wed","Thu","Fri"];
-      if (!scheduleDays.includes(dayName)) { console.log(`Skipping ${client.name} — not scheduled today`); continue; }
+      if (!scheduleDays.includes(dayName)) { console.log(`Skipping ${client.name} — not scheduled today (EST: ${dayName})`); continue; }
 
-      const todayStart = new Date(today.setHours(0,0,0,0)).toISOString();
       const { data: todayJobs } = await supabase.from("scheduled_jobs")
         .select("id").eq("client_id", client.id)
         .gte("scheduled_time", todayStart)
@@ -1672,9 +1686,18 @@ const scheduleDailyPosts = async () => {
       const startHour = client.schedule_start_hour || 9;
       const endHour = client.schedule_end_hour || 12;
       const randomMinutes = Math.floor(Math.random() * ((endHour - startHour) * 60));
-      const scheduledTime = new Date();
-      scheduledTime.setHours(startHour, 0, 0, 0);
+
+      // Build scheduled time anchored to EST: today's date at startHour in EST, converted to UTC
+      const estOffsetHours = estOffsetMs / 3600000; // e.g. -5 for EST, -4 for EDT
+      const sign = estOffsetHours <= 0 ? "-" : "+";
+      const absH = String(Math.floor(Math.abs(estOffsetHours))).padStart(2, "0");
+      const absM = String(Math.round((Math.abs(estOffsetHours) % 1) * 60)).padStart(2, "0");
+      const hh = String(startHour).padStart(2, "0");
+      const scheduledTime = new Date(`${estParts.year}-${estParts.month}-${estParts.day}T${hh}:00:00${sign}${absH}:${absM}`);
       scheduledTime.setMinutes(scheduledTime.getMinutes() + randomMinutes);
+
+      const estTimeStr = scheduledTime.toLocaleTimeString("en-US", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
+      console.log(`⏱ ${client.name} — "${keyword}" scheduled for ${estTimeStr} EST`);
 
       const { data: job } = await supabase.from("scheduled_jobs").insert([{
         client_id: client.id, keyword, scheduled_time: scheduledTime.toISOString(), status: "pending"
@@ -1683,7 +1706,6 @@ const scheduleDailyPosts = async () => {
       const msUntilPublish = scheduledTime.getTime() - Date.now();
       if (msUntilPublish > 0) {
         if (queueItemId) await supabase.from("client_keyword_queue").update({ used: true }).eq("id", queueItemId);
-        console.log(`⏱ ${client.name} — "${keyword}" scheduled for ${scheduledTime.toLocaleTimeString()}`);
         setTimeout(async () => {
           try {
             await supabase.from("scheduled_jobs").update({ status: "running" }).eq("id", job.id);
@@ -1702,10 +1724,9 @@ const scheduleDailyPosts = async () => {
     }
   }
 };
+cron.schedule("45 13 * * *", scheduleDailyPosts); // 8:45am EST (UTC-5) / 9:45am EDT (UTC-4)
 
-cron.schedule("45 8 * * *", scheduleDailyPosts);
-
-cron.schedule("0 7 1 * *", async () => {
+cron.schedule("0 12 1 * *", async () => { // 7am EST on the 1st of each month
   console.log("📅 Monthly keyword refresh starting...");
   const { data: clients } = await supabase.from("clients").select("*").eq("status", "active").eq("schedule_enabled", true);
   for (const client of (clients || [])) {
@@ -1715,7 +1736,7 @@ cron.schedule("0 7 1 * *", async () => {
     } catch (e) { console.error("Monthly refresh failed for " + client.name + ":", e.message); }
   }
 });
-console.log("✓ Scheduler initialized — runs daily at 8:45am");
+console.log("✓ Scheduler initialized — runs daily at 8:45am EST");
 
 // ─── SEO AUDIT ENGINE ────────────────────────────────────────────
 
