@@ -829,8 +829,8 @@ app.post("/api/competitors/find", async (req, res) => {
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 500,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{
         role: "user",
