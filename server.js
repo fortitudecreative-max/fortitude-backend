@@ -596,7 +596,7 @@ Return only the JSON, no other text.`;
       post.id = savedPost?.[0]?.id;
     }
 
-    res.json({ post, featuredImage });
+    res.json({ post, featuredImage, schemaHtml: schemaHtml || null });
   } catch (error) {
     console.error("Content generation error:", error.message);
     res.status(500).json({ error: "Failed to generate content", detail: error.message });
@@ -605,7 +605,7 @@ Return only the JSON, no other text.`;
 
 // ─── WORDPRESS PUBLISHING ───────────────────────────────────────
 app.post("/api/publish/wordpress", async (req, res) => {
-  let { postId, clientId, title, content, slug, metaDescription, keyword, wordpressUrl, wpUsername, wpPassword, featuredImageUrl, featuredImageSlug } = req.body;
+  let { postId, clientId, title, content, slug, metaDescription, keyword, wordpressUrl, wpUsername, wpPassword, featuredImageUrl, featuredImageSlug, schemaHtml: schemaHtmlFromBody, longtailKeyphrase: longtailKeyphraseFromBody } = req.body;
   if (!wordpressUrl || !wpUsername || !wpPassword) return res.status(400).json({ error: "WordPress credentials required" });
   // Safety net: convert markdown to HTML before posting
   content = markdownToHtml(content);
@@ -613,6 +613,11 @@ app.post("/api/publish/wordpress", async (req, res) => {
   try {
     const credentials = Buffer.from(`${wpUsername}:${wpPassword}`).toString("base64");
     const authHeaders = { "Authorization": `Basic ${credentials}` };
+
+    // Resolve schemaHtml and longtailKeyphrase — may come from request body (frontend passes these)
+    // or be rebuilt from available data as a fallback
+    const schemaHtml = schemaHtmlFromBody || null;
+    let longtailKeyphrase = longtailKeyphraseFromBody || null;
 
     let featuredMediaId = null;
     if (featuredImageUrl) {
@@ -1015,55 +1020,110 @@ app.post("/api/competitors/find", async (req, res) => {
   const { clientName, industry, domain, serviceArea } = req.body;
   if (!clientName || !industry) return res.status(400).json({ error: "clientName and industry required" });
 
-  const searchQuery = serviceArea
-    ? `${industry} companies ${serviceArea}`
-    : `${industry} companies near ${domain || clientName}`;
+  const location = serviceArea || "";
+  const excludeDomain = domain || "";
+
+  const EXCLUDE_PATTERNS = [
+    "yelp","angi","homeadvisor","thumbtack","bbb","angieslist","houzz",
+    "porch.com","google","facebook","instagram","youtube","amazon","indeed",
+    "linkedin","bing","yahoo","acehardware","lowes","homedepot",
+    "lennox","carrier","trane","goodman","rheem","york",
+  ];
+
+  const isDomainExcluded = (d) => {
+    if (!d) return true;
+    const lower = d.toLowerCase();
+    if (excludeDomain && lower.includes(excludeDomain.toLowerCase().replace(/https?:\/\//,""))) return true;
+    if (clientName && lower.includes(clientName.toLowerCase().split(" ")[0])) return true;
+    return EXCLUDE_PATTERNS.some(p => lower.includes(p));
+  };
+
+  const extractDomainsFromBlocks = (blocks) => {
+    const domains = new Set();
+    for (const block of blocks) {
+      let text = "";
+      if (block.type === "tool_result") {
+        text = typeof block.content === "string" ? block.content
+          : (block.content || []).map(c => c.text || "").join(" ");
+      } else if (block.type === "text" && block.text) {
+        text = block.text;
+      }
+      if (!text) continue;
+      const urlMatches = [...text.matchAll(/https?:\/\/(?:www\.)?([a-z0-9][a-z0-9\-\.]*\.[a-z]{2,6})/gi)];
+      const plainMatches = [...text.matchAll(/\b(?:www\.)?([a-z0-9][a-z0-9\-]+\.[a-z]{2,6})\b/gi)];
+      [...urlMatches, ...plainMatches].forEach(m => {
+        const d = m[1].toLowerCase().replace(/^\./, "");
+        if (d.includes(".") && !isDomainExcluded(d)) domains.add(d);
+      });
+    }
+    return [...domains];
+  };
 
   try {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-    const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 800,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      system: `You are a competitor research tool. Search Google for local ${industry} companies${serviceArea ? ` in ${serviceArea}` : ""}. 
-Extract exactly 5 competitor website domains from the search results. 
-Exclude "${clientName}"${domain ? ` and ${domain}` : ""}, directories (yelp, angi, homeadvisor, thumbtack, bbb), manufacturers, and national chains.
-Respond ONLY with a valid JSON array of 5 domain strings. No explanation, no markdown.`,
-      messages: [
-        {
-          role: "user",
-          content: `Search for: "${searchQuery}"\n\nReturn a JSON array of 5 local competitor domains found in the results.`
+    const searches = location ? [
+      `${industry} contractor ${location}`,
+      `best ${industry} company ${location}`,
+      `${industry} repair ${location}`,
+    ] : [
+      `${industry} contractor near ${clientName}`,
+      `best local ${industry} company`,
+    ];
+
+    let allDomains = [];
+
+    for (const query of searches) {
+      if (allDomains.length >= 5) break;
+      try {
+        const resp = await anthropic.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 600,
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          system: "Search the web and return ONLY a JSON array of website domains found. No explanation.",
+          messages: [{ role: "user", content: `Search: "${query}" — list all website domains you find as a JSON array like ["domain1.com","domain2.com"]` }],
+        });
+
+        const fromBlocks = extractDomainsFromBlocks(resp.content);
+
+        // Also try parsing JSON array from text block
+        const textBlock = resp.content.find(b => b.type === "text");
+        const raw = textBlock?.text?.trim() || "";
+        const arrayMatch = raw.match(/\[[\s\S]*?\]/);
+        if (arrayMatch) {
+          try {
+            const parsed = JSON.parse(arrayMatch[0]);
+            if (Array.isArray(parsed)) {
+              parsed.forEach(d => {
+                if (typeof d === "string") {
+                  const clean = d.toLowerCase().replace(/https?:\/\//, "").replace(/^\.?www\./, "").split("/")[0];
+                  if (clean && !isDomainExcluded(clean)) fromBlocks.push(clean);
+                }
+              });
+            }
+          } catch(e) {}
         }
-      ],
-    });
 
-    // Extract text from all content blocks (web_search returns tool_use + text blocks)
-    const textBlock = response.content.find(b => b.type === "text");
-    const raw = textBlock?.text?.trim() || "";
-    console.log("[Competitors] Raw response:", raw.slice(0, 400));
-
-    // Parse JSON array from response
-    const arrayMatch = raw.match(/\[[\s\S]*?\]/);
-    let competitors;
-    if (arrayMatch) {
-      try { competitors = JSON.parse(arrayMatch[0]); } catch(e) { competitors = null; }
-    }
-    // Fallback: salvage domain strings from anywhere in the text
-    if (!competitors || !competitors.length) {
-      competitors = [...raw.matchAll(/"([a-z0-9][a-z0-9.-]*\.[a-z]{2,})"/gi)].map(m => m[1]).slice(0, 5);
-    }
-    if (!competitors || !competitors.length) {
-      return res.status(500).json({ error: "Could not find local competitors", raw: raw.slice(0, 300) });
+        console.log(`[Competitors] "${query}" → ${fromBlocks.slice(0,5).join(", ") || "none"}`);
+        allDomains.push(...fromBlocks);
+        allDomains = [...new Set(allDomains)].filter(d => !isDomainExcluded(d));
+      } catch(searchErr) {
+        console.log(`[Competitors] Search error for "${query}":`, searchErr.message);
+      }
     }
 
+    const competitors = allDomains.slice(0, 5);
+    if (!competitors.length) {
+      return res.status(500).json({ error: "Could not find local competitors. Add a service area in Edit Client and retry." });
+    }
     res.json({ competitors });
   } catch (err) {
     console.error("Competitor find error:", err.message);
     res.status(500).json({ error: "Failed to find competitors", detail: err.message });
   }
 });
+
 app.put("/api/clients/:id/competitors", async (req, res) => {
   const { id } = req.params;
   const { competitors } = req.body;
