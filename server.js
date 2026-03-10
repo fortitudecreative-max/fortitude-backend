@@ -235,6 +235,27 @@ app.delete("/api/keywords/library/:id", async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true });
 });
+// ─── USED KEYWORDS ───────────────────────────────────────────────
+app.get("/api/keywords/used", async (req, res) => {
+  const { data, error } = await supabase.from("used_keywords").select("*").order("added_at", { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ keywords: data });
+});
+
+app.post("/api/keywords/used", async (req, res) => {
+  const { keyword } = req.body;
+  if (!keyword) return res.status(400).json({ error: "keyword required" });
+  const { data, error } = await supabase.from("used_keywords").insert([{ keyword: keyword.trim(), added_at: new Date().toISOString() }]).select();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ keyword: data[0] });
+});
+
+app.delete("/api/keywords/used/:id", async (req, res) => {
+  const { id } = req.params;
+  const { error } = await supabase.from("used_keywords").delete().eq("id", id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
 
 // ─── IMAGE LIBRARY ───────────────────────────────────────────────
 const upload = multer({ storage: multer.memoryStorage() });
