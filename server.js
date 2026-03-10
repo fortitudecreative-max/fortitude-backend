@@ -1083,6 +1083,27 @@ app.get("/api/schedule/:clientId", async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json({ jobs: data });
 });
+// Add a keyword to a client's scheduled queue manually
+app.post("/api/schedule/add", async (req, res) => {
+  const { clientId, keyword } = req.body;
+  if (!clientId || !keyword) return res.status(400).json({ error: "clientId and keyword required" });
+  try {
+    // Schedule for tomorrow at 8:45am EST (same as daily cron)
+    const scheduledTime = new Date();
+    scheduledTime.setDate(scheduledTime.getDate() + 1);
+    scheduledTime.setHours(13, 45, 0, 0); // 8:45am EST = 13:45 UTC
+    const { data, error } = await supabase.from("scheduled_jobs").insert([{
+      client_id: clientId,
+      keyword,
+      scheduled_time: scheduledTime.toISOString(),
+      status: "pending",
+    }]).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, job: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.patch("/api/schedule/job/:id", async (req, res) => {
   const { id } = req.params;
