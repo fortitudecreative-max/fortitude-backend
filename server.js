@@ -1009,45 +1009,53 @@ app.get("/api/keywords/gap", async (req, res) => {
 });
 
 // ─── COMPETITOR FINDER ───────────────────────────────────────────
+// Uses web_search tool so Claude finds real local competitors from Google results
+// rather than guessing. Requires serviceArea (e.g. "Charlotte, NC") for accuracy.
 app.post("/api/competitors/find", async (req, res) => {
-  const { clientName, industry, domain } = req.body;
+  const { clientName, industry, domain, serviceArea } = req.body;
   if (!clientName || !industry) return res.status(400).json({ error: "clientName and industry required" });
+
+  const searchQuery = serviceArea
+    ? `${industry} companies ${serviceArea}`
+    : `${industry} companies near ${domain || clientName}`;
+
   try {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
     const response = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 200,
-      system: "You are a JSON API. You ONLY output valid JSON arrays. Never output explanations, apologies, or any text outside the JSON array. If you are unsure, make your best guess and output the JSON array anyway.",
+      max_tokens: 800,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      system: `You are a competitor research tool. Search Google for local ${industry} companies${serviceArea ? ` in ${serviceArea}` : ""}. 
+Extract exactly 5 competitor website domains from the search results. 
+Exclude "${clientName}"${domain ? ` and ${domain}` : ""}, directories (yelp, angi, homeadvisor, thumbtack, bbb), manufacturers, and national chains.
+Respond ONLY with a valid JSON array of 5 domain strings. No explanation, no markdown.`,
       messages: [
         {
           role: "user",
-          content: `Return a JSON array of 5 competitor website domains for a ${industry} company called "${clientName}"${domain ? ` (${domain})` : ""}. Use the name/domain to infer their region. Return local/regional ${industry} service companies only. No directories, manufacturers, or national brands.`
-        },
-        {
-          role: "assistant",
-          content: '["'
+          content: `Search for: "${searchQuery}"\n\nReturn a JSON array of 5 local competitor domains found in the results.`
         }
       ],
     });
 
-    const partial = (response.content.find(b => b.type === "text")?.text || "").trim();
-    const raw = '["' + partial;
-    console.log("[Competitors] Raw:", raw.slice(0, 300));
+    // Extract text from all content blocks (web_search returns tool_use + text blocks)
+    const textBlock = response.content.find(b => b.type === "text");
+    const raw = textBlock?.text?.trim() || "";
+    console.log("[Competitors] Raw response:", raw.slice(0, 400));
 
-    // Parse — try full array first, then salvage domains from partial JSON
+    // Parse JSON array from response
     const arrayMatch = raw.match(/\[[\s\S]*?\]/);
     let competitors;
     if (arrayMatch) {
       try { competitors = JSON.parse(arrayMatch[0]); } catch(e) { competitors = null; }
     }
+    // Fallback: salvage domain strings from anywhere in the text
     if (!competitors || !competitors.length) {
-      // Salvage: grab anything that looks like domain.tld
-      competitors = [...raw.matchAll(/"([a-z0-9][a-z0-9-]*\.[a-z]{2,}(?:\.[a-z]{2,})?)"/g)].map(m => m[1]).slice(0, 5);
+      competitors = [...raw.matchAll(/"([a-z0-9][a-z0-9.-]*\.[a-z]{2,})"/gi)].map(m => m[1]).slice(0, 5);
     }
     if (!competitors || !competitors.length) {
-      return res.status(500).json({ error: "Could not parse competitors", raw: raw.slice(0, 300) });
+      return res.status(500).json({ error: "Could not find local competitors", raw: raw.slice(0, 300) });
     }
 
     res.json({ competitors });
