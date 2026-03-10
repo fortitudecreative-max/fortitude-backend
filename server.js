@@ -852,8 +852,14 @@ You MUST respond with ONLY a raw JSON array of 5 domain strings. No explanation,
     const textBlock = message.content.find(b => b.type === "text");
     if (!textBlock) return res.status(500).json({ error: "No response from Claude" });
 
-    const clean = textBlock.text.trim().replace(/```json|```/g, "").trim();
-    const competitors = JSON.parse(clean);
+    const raw = textBlock.text.trim();
+    console.log("[Competitors] Raw response:", raw.slice(0, 300));
+
+    // Extract JSON array from anywhere in the response (handles "Based on..." preamble)
+    const arrayMatch = raw.match(/\[[\s\S]*?\]/);
+    if (!arrayMatch) return res.status(500).json({ error: "No JSON array found in response", raw: raw.slice(0, 300) });
+
+    const competitors = JSON.parse(arrayMatch[0]);
     res.json({ competitors });
   } catch (err) {
     console.error("Competitor find error:", err.message);
