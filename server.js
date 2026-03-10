@@ -256,6 +256,41 @@ app.delete("/api/keywords/used/:id", async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true });
 });
+// ─── PER-CLIENT USED KEYWORDS ────────────────────────────────────
+app.get("/api/keywords/used/:clientId", async (req, res) => {
+  const { clientId } = req.params;
+  const page = parseInt(req.query.page) || 1;
+  const limit = 20;
+  const offset = (page - 1) * limit;
+  const { data, error, count } = await supabase.from("client_used_keywords")
+    .select("*", { count: "exact" })
+    .eq("client_id", clientId)
+    .order("added_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ keywords: data, total: count, page, pages: Math.ceil(count / limit) });
+});
+
+app.post("/api/keywords/used/:clientId", async (req, res) => {
+  const { clientId } = req.params;
+  const { keyword } = req.body;
+  if (!keyword) return res.status(400).json({ error: "keyword required" });
+  // Upsert — don't duplicate
+  const { data: existing } = await supabase.from("client_used_keywords")
+    .select("id").eq("client_id", clientId).eq("keyword", keyword.trim()).single();
+  if (existing) return res.json({ keyword: existing, duplicate: true });
+  const { data, error } = await supabase.from("client_used_keywords")
+    .insert([{ client_id: clientId, keyword: keyword.trim(), added_at: new Date().toISOString() }]).select();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ keyword: data[0] });
+});
+
+app.delete("/api/keywords/used-client/:id", async (req, res) => {
+  const { id } = req.params;
+  const { error } = await supabase.from("client_used_keywords").delete().eq("id", id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
 
 // ─── IMAGE LIBRARY ───────────────────────────────────────────────
 const upload = multer({ storage: multer.memoryStorage() });
@@ -764,6 +799,21 @@ app.post("/api/publish/wordpress", async (req, res) => {
       }
     }
 
+    // Auto-add keyword to client's used keywords list and remove from queues
+    if (clientId && keyword) {
+      try {
+        // Add to used keywords (upsert)
+        const { data: existingUsed } = await supabase.from("client_used_keywords")
+          .select("id").eq("client_id", clientId).eq("keyword", keyword.trim()).single();
+        if (!existingUsed) {
+          await supabase.from("client_used_keywords")
+            .insert([{ client_id: clientId, keyword: keyword.trim(), added_at: new Date().toISOString() }]);
+        }
+        // Remove from monthly keyword queue
+        await supabase.from("client_keyword_queue")
+          .delete().eq("client_id", clientId).ilike("keyword", keyword.trim());
+      } catch(e) { console.error("Used keyword hook error:", e.message); }
+    }
     res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta, yoastOpt: yoastOptResult });
   } catch (error) {
     console.error("WordPress publish error:", error.response?.data || error.message);
@@ -2273,6 +2323,12 @@ const scheduleDailyPosts = async () => {
             await supabase.from("scheduled_jobs").update({ status: "running" }).eq("id", job.id);
             const wpPostId = await publishPostForClient(client, keyword);
             await supabase.from("scheduled_jobs").update({ status: "published", wp_post_id: wpPostId }).eq("id", job.id);
+            // Auto-add to client used keywords
+            try {
+              const { data: eu } = await supabase.from("client_used_keywords").select("id").eq("client_id", client.id).eq("keyword", keyword.trim()).single();
+              if (!eu) await supabase.from("client_used_keywords").insert([{ client_id: client.id, keyword: keyword.trim(), added_at: new Date().toISOString() }]);
+              await supabase.from("client_keyword_queue").delete().eq("client_id", client.id).ilike("keyword", keyword.trim());
+            } catch(e) {}
           } catch (e) {
             await supabase.from("scheduled_jobs").update({ status: "failed" }).eq("id", job.id);
           }
