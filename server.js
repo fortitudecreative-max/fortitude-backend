@@ -579,8 +579,8 @@ Return only the JSON, no other text.`;
       authorName: "",
     });
     if (appendHtml) post.content = post.content + appendHtml;
-    if (schemaHtml) post.content = post.content + "\n" + schemaHtml;
-    console.log("[Content] Schema types injected:", schemaTypes);
+    // schemaHtml is saved via the Fortitude /schema endpoint after publish (not injected into body)
+    console.log("[Content] Schema types prepared:", schemaTypes);
 
     if (clientId) {
       const { data: savedPost } = await supabase.from("posts").insert([{
@@ -682,6 +682,29 @@ app.post("/api/publish/wordpress", async (req, res) => {
 
     const wpPost = wpRes.data;
     console.log("✓ Post created, ID:", wpPost.id);
+
+    // Save schema to Fortitude plugin endpoint (outputs in wp_head, not post body)
+    if (schemaHtml) {
+      (async () => {
+        try {
+          const schemaBlocks = [];
+          const schemaRegex = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/gi;
+          let sm;
+          while ((sm = schemaRegex.exec(schemaHtml)) !== null) {
+            try { schemaBlocks.push(JSON.parse(sm[1])); } catch(e) {}
+          }
+          if (schemaBlocks.length > 0) {
+            await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/schema`,
+              { post_id: wpPost.id, schema: schemaBlocks },
+              { headers: authHeaders, httpsAgent, timeout: 8000 }
+            );
+            console.log(`[Schema] ✓ Saved ${schemaBlocks.length} schema block(s) via Fortitude plugin`);
+          }
+        } catch(se) {
+          console.log(`[Schema] Plugin save skipped (${se.message}) — schema present in post content as fallback`);
+        }
+      })();
+    }
 
     // ── Detect SEO capabilities: Fortitude plugin + Yoast edition ────────────
     let seoCaps = { yoast: "none", fortitudePlugin: false, canWriteSeoMeta: false };
