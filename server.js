@@ -1424,11 +1424,13 @@ function buildSchemaBlock(opts) {
     };
     schemas.push(faqSchema);
 
-    // Build [sc_fs_multi_faq] shortcode (renders FAQ accordion + triggers Yoast FAQ schema)
-    const shortcodeAttrs = faqs.map((f, i) => `headline-${i}="h3" question-${i}="${f.question.replace(/"/g, "'")}" answer-${i}="${f.answer.replace(/"/g, "'")}" image-${i}=""`).join(" ");
-    const shortcode = `[sc_fs_multi_faq ${shortcodeAttrs} count="${faqs.length}" html="true" css_class=""]`;
+    // Build plain HTML FAQ accordion — no plugin dependency, always renders correctly
+    const faqItems = faqs.map(f => `<div class="faq-item" style="margin-bottom:20px;border-bottom:1px solid #eee;padding-bottom:16px;">
+<h3 style="margin:0 0 8px;font-size:1.1em;">${f.question.replace(/</g,"&lt;").replace(/>/g,"&gt;")}</h3>
+<p style="margin:0;color:#444;">${f.answer.replace(/</g,"&lt;").replace(/>/g,"&gt;")}</p>
+</div>`).join("\n");
 
-    faqHtml = `\n<div class="faq-section">\n<h2>Frequently Asked Questions</h2>\n${shortcode}\n</div>`;
+    faqHtml = `\n<div class="faq-section">\n<h2>Frequently Asked Questions</h2>\n${faqItems}\n</div>`;
   }
 
   // ── 4. Combined JSON-LD injection ─────────────────────────────
@@ -1539,6 +1541,16 @@ const verifyPublishedPost = async (liveUrl, { title, keyword, metaDescription, w
   // H2 subheadings (blog post should have structure)
   const h2Count = (html.match(/<h2[^>]*>/gi) || []).length;
   if (h2Count < 2) qa.warnings.push({ type: "no_structure", severity: "warning", message: `Only ${h2Count} H2 subheading(s) — post lacks section structure` });
+
+  // Raw shortcodes visible on page (unrendered WordPress shortcodes)
+  if (/\[sc_fs_multi_faq|\[faq|\[accordion/i.test(bodyText)) {
+    qa.issues.push({ type: "raw_shortcode", severity: "error", message: "Raw WordPress shortcode visible on live page — plugin likely not installed. Use plain HTML instead." });
+  }
+
+  // Visible schema JSON in body text (should only be in <script> tags)
+  if (/"@context"\s*:\s*"https?:\/\/schema\.org"/.test(bodyText)) {
+    qa.issues.push({ type: "visible_schema_json", severity: "error", message: "Schema JSON-LD is visible as plain text on the page — it must be inside a <script type=\"application/ld+json\"> tag, not in the post body." });
+  }
 
   // Word count (rough)
   const wordCount = bodyText.split(/\s+/).filter(Boolean).length;
