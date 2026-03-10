@@ -596,7 +596,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
             const r = await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/seo-meta`, {
               post_id: wpPost.id,
               focuskw: longtailKeyphrase,
-              metadesc: safeMetaDesc,
+              metadesc: metaDescription,
               title: `${title} - %%sitename%%`,
             }, { headers: authHeaders, httpsAgent });
             if (r.data?.success) console.log("✓ Yoast meta written via Fortitude plugin");
@@ -610,10 +610,10 @@ app.post("/api/publish/wordpress", async (req, res) => {
           await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
             meta: {
               _yoast_wpseo_focuskw: longtailKeyphrase,
-              _yoast_wpseo_metadesc: safeMetaDesc,
+              _yoast_wpseo_metadesc: metaDescription,
               _yoast_wpseo_title: `${title} - %%sitename%%`,
               _yoast_wpseo_opengraph_title: title,
-              _yoast_wpseo_opengraph_description: safeMetaDesc,
+              _yoast_wpseo_opengraph_description: metaDescription,
             }
           }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
           console.log("✓ Yoast meta written via REST postmeta");
@@ -660,7 +660,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
           await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
             meta: {
               _yoast_wpseo_focuskw: longtailKeyphrase,
-              _yoast_wpseo_metadesc: safeMetaDesc,
+              _yoast_wpseo_metadesc: metaDescription,
               _yoast_wpseo_title: `${title} - %%sitename%%`,
               "astra-migrate-meta-layouts": "set",
             }
@@ -685,7 +685,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
       try {
         yoastOptResult = await runYoastOptimizeLoop(
           wpPost.id,
-          { title, keyword, metaDescription: safeMetaDesc },
+          { title, keyword, metaDescription: metaDescription },
           wordpressUrl,
           { ...authHeaders, "Content-Type": "application/json" },
           seoCaps
@@ -1548,6 +1548,8 @@ const MAX_REPAIR_CYCLES = 3;
 const YOAST_MAX_PASSES = 5;
 
 const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription }, wpBaseUrl, authHeaders, seoCaps) => {
+  const Anthropic = require("@anthropic-ai/sdk");
+  const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
   const log = (msg) => console.log(`[YoastOpt] ${msg}`);
   const fixes = [];
   let currentTitle   = title;
