@@ -848,21 +848,43 @@ app.post("/api/competitors/find", async (req, res) => {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-    // No web_search tool — use training knowledge directly. Much more reliable for this use case.
-    const prompt = `List the top 5 LOCAL competitor websites for a ${industry} company called "${clientName}"${domain ? ` (website: ${domain})` : ""}. These must be real local or regional service companies competing in the same market area. Exclude: equipment manufacturers, directory/review sites (Yelp, Angi, HomeAdvisor), national brands without local presence, parts suppliers. You MUST respond with ONLY a raw JSON array of 5 domain strings, no other text, no markdown, no explanation. Example: [company1.com,company2.com,company3.com,company4.com,company5.com]`;
+    const prompt = `You are helping an SEO agency identify competitor websites for a client.
 
+Client name: ${clientName}
+Industry: ${industry}${domain ? `\nClient website: ${domain}` : ""}
+
+Task: Return exactly 5 competitor domain names. These should be local or regional ${industry} service companies in the same market area. Use the client name and domain to infer their city/region.
+
+CRITICAL: Your entire response must be ONLY a valid JSON array of 5 domain strings. No text before or after. No markdown. No explanation. Just the array.
+
+Like this: ["co1.com","co2.com","co3.com","co4.com","co5.com"]`;
+
+    // Prefill assistant turn with opening bracket to force JSON output
     const response = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 200,
-      messages: [{ role: "user", content: prompt }],
+      messages: [
+        { role: "user", content: prompt },
+        { role: "assistant", content: '["' }
+      ],
     });
 
-    const raw = (response.content.find(b => b.type === "text")?.text || "").trim();
-    console.log("[Competitors] Raw:", raw.slice(0, 200));
+    const raw = '["' + (response.content.find(b => b.type === "text")?.text || "").trim();
+    console.log("[Competitors] Raw:", raw.slice(0, 300));
 
     const arrayMatch = raw.match(/\[[\s\S]*?\]/);
-    if (!arrayMatch) return res.status(500).json({ error: "No JSON array found in response", raw: raw.slice(0, 200) });
-    const competitors = JSON.parse(arrayMatch[0]);
+    if (!arrayMatch) return res.status(500).json({ error: "No JSON array found in response", raw: raw.slice(0, 300) });
+
+    let competitors;
+    try {
+      competitors = JSON.parse(arrayMatch[0]);
+    } catch(e) {
+      // Salvage: pull out anything that looks like a domain
+      const domains = [...raw.matchAll(/"([a-z0-9-]+\.[a-z]{2,})"/g)].map(m => m[1]);
+      if (!domains.length) return res.status(500).json({ error: "Could not parse competitor domains", raw: raw.slice(0, 300) });
+      competitors = domains.slice(0, 5);
+    }
+
     res.json({ competitors });
   } catch (err) {
     console.error("Competitor find error:", err.message);
