@@ -1177,6 +1177,54 @@ app.post("/api/keywords/monthly-refresh/:clientId", async (req, res) => {
   }
 });
 
+
+// ─── CLIENT KEYWORDS (per-client keyword list) ───────────────────────────────
+// These are keywords assigned to a specific client from the library.
+// From here they can be dragged to the monthly queue or removed.
+
+app.get("/api/clients/:clientId/keywords", requireAuth, async (req, res) => {
+  const { clientId } = req.params;
+  const page = parseInt(req.query.page) || 1;
+  const limit = 20;
+  const offset = (page - 1) * limit;
+  const { data, error, count } = await supabase
+    .from("client_keywords")
+    .select("*", { count: "exact" })
+    .eq("client_id", clientId)
+    .order("added_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ keywords: data, total: count, page, pages: Math.ceil(count / limit) });
+});
+
+app.post("/api/clients/:clientId/keywords", requireAuth, async (req, res) => {
+  const { clientId } = req.params;
+  const { keyword, volume, kd, intent, source } = req.body;
+  if (!keyword) return res.status(400).json({ error: "keyword required" });
+  // Avoid duplicates
+  const { data: existing } = await supabase
+    .from("client_keywords")
+    .select("id")
+    .eq("client_id", clientId)
+    .ilike("keyword", keyword)
+    .maybeSingle();
+  if (existing) return res.json({ keyword: existing, duplicate: true });
+  const { data, error } = await supabase
+    .from("client_keywords")
+    .insert({ client_id: clientId, keyword, volume: volume || 0, kd: kd || 0, intent: intent || "Informational", source: source || "library" })
+    .select()
+    .single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ keyword: data });
+});
+
+app.delete("/api/clients/:clientId/keywords/:id", requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const { error } = await supabase.from("client_keywords").delete().eq("id", id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
+
 app.get("/api/keywords/queue/:clientId", async (req, res) => {
   const { clientId } = req.params;
   const month = new Date().toISOString().slice(0, 7);
