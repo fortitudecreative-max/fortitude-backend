@@ -823,42 +823,37 @@ app.get("/api/keywords/gap", async (req, res) => {
 app.post("/api/competitors/find", async (req, res) => {
   const { clientName, industry, domain } = req.body;
   if (!clientName || !industry) return res.status(400).json({ error: "clientName and industry required" });
-
   try {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-    const message = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 500,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{
-        role: "user",
-        content: `Find the top 5 LOCAL competitor websites for a ${industry} company called "${clientName}"${domain ? ` with website ${domain}` : ""}. These must be LOCAL or REGIONAL service companies that compete directly for the same customers in the same geographic area.
+    // Agentic loop — web_search tool requires multi-turn until stop_reason === end_turn
+    const userPrompt = `Search for the top 5 LOCAL competitor websites for a ${industry} company called "${clientName}"${domain ? ` with website ${domain}` : ""}. Must be local/regional service companies competing for the same customers. Exclude directories (Yelp, Angi), manufacturers, and national brands without local presence. After searching, output ONLY a raw JSON array of 5 domain strings, nothing else. Example: ["co1.com","co2.com","co3.com","co4.com","co5.com"]`;
+    let messages = [{ role: "user", content: userPrompt }];
+    let finalText = "";
 
-STRICT RULES — exclude any of the following, they are NOT valid competitors:
-- Equipment manufacturers (Carrier, Trane, Lennox, Rheem, Goodman, Daikin, York, Bryant, etc.)
-- National franchise brands unless they have a local branch competing in the same city
-- Review/directory sites (Angi, Yelp, HomeAdvisor, Thumbtack, etc.)
-- Parts suppliers or wholesalers
-- Industry associations or certification bodies
+    for (let i = 0; i < 6; i++) {
+      const response = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1000,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages,
+      });
+      const textBlocks = response.content.filter(b => b.type === "text");
+      if (textBlocks.length) finalText = textBlocks.map(b => b.text).join("\n");
+      if (response.stop_reason === "end_turn") break;
+      if (response.stop_reason === "tool_use") {
+        messages.push({ role: "assistant", content: response.content });
+        const toolResults = response.content
+          .filter(b => b.type === "tool_use")
+          .map(b => ({ type: "tool_result", tool_use_id: b.id, content: "" }));
+        messages.push({ role: "user", content: toolResults });
+      } else break;
+    }
 
-Only include: local owner-operated companies, regional service chains, or local franchise locations that are actively competing for the same homeowner or commercial service calls in the same market.
-
-You MUST respond with ONLY a raw JSON array of 5 domain strings. No explanation, no markdown, no preamble. Example: ["localcompany1.com","localcompany2.com","localcompany3.com","localcompany4.com","localcompany5.com"]`
-      }],
-    });
-
-    const textBlock = message.content.find(b => b.type === "text");
-    if (!textBlock) return res.status(500).json({ error: "No response from Claude" });
-
-    const raw = textBlock.text.trim();
-    console.log("[Competitors] Raw response:", raw.slice(0, 300));
-
-    // Extract JSON array from anywhere in the response (handles "Based on..." preamble)
-    const arrayMatch = raw.match(/\[[\s\S]*?\]/);
-    if (!arrayMatch) return res.status(500).json({ error: "No JSON array found in response", raw: raw.slice(0, 300) });
-
+    console.log("[Competitors] Final text:", finalText.slice(0, 300));
+    const arrayMatch = finalText.match(/\[[\s\S]*?\]/);
+    if (!arrayMatch) return res.status(500).json({ error: "No JSON array found in response", raw: finalText.slice(0, 300) });
     const competitors = JSON.parse(arrayMatch[0]);
     res.json({ competitors });
   } catch (err) {
@@ -866,6 +861,7 @@ You MUST respond with ONLY a raw JSON array of 5 domain strings. No explanation,
     res.status(500).json({ error: "Failed to find competitors", detail: err.message });
   }
 });
+
 
 app.put("/api/clients/:id/competitors", async (req, res) => {
   const { id } = req.params;
