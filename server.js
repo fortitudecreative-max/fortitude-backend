@@ -848,33 +848,20 @@ app.post("/api/competitors/find", async (req, res) => {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-    // Agentic loop — web_search tool requires multi-turn until stop_reason === end_turn
-    const userPrompt = `Search for the top 5 LOCAL competitor websites for a ${industry} company called "${clientName}"${domain ? ` with website ${domain}` : ""}. Must be local/regional service companies competing for the same customers. Exclude directories (Yelp, Angi), manufacturers, and national brands without local presence. After searching, output ONLY a raw JSON array of 5 domain strings, nothing else. Example: ["co1.com","co2.com","co3.com","co4.com","co5.com"]`;
-    let messages = [{ role: "user", content: userPrompt }];
-    let finalText = "";
+    // No web_search tool — use training knowledge directly. Much more reliable for this use case.
+    const prompt = `List the top 5 LOCAL competitor websites for a ${industry} company called "${clientName}"${domain ? ` (website: ${domain})` : ""}. These must be real local or regional service companies competing in the same market area. Exclude: equipment manufacturers, directory/review sites (Yelp, Angi, HomeAdvisor), national brands without local presence, parts suppliers. You MUST respond with ONLY a raw JSON array of 5 domain strings, no other text, no markdown, no explanation. Example: [company1.com,company2.com,company3.com,company4.com,company5.com]`;
 
-    for (let i = 0; i < 6; i++) {
-      const response = await anthropic.messages.create({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1000,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages,
-      });
-      const textBlocks = response.content.filter(b => b.type === "text");
-      if (textBlocks.length) finalText = textBlocks.map(b => b.text).join("\n");
-      if (response.stop_reason === "end_turn") break;
-      if (response.stop_reason === "tool_use") {
-        messages.push({ role: "assistant", content: response.content });
-        const toolResults = response.content
-          .filter(b => b.type === "tool_use")
-          .map(b => ({ type: "tool_result", tool_use_id: b.id, content: "" }));
-        messages.push({ role: "user", content: toolResults });
-      } else break;
-    }
+    const response = await anthropic.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 200,
+      messages: [{ role: "user", content: prompt }],
+    });
 
-    console.log("[Competitors] Final text:", finalText.slice(0, 300));
-    const arrayMatch = finalText.match(/\[[\s\S]*?\]/);
-    if (!arrayMatch) return res.status(500).json({ error: "No JSON array found in response", raw: finalText.slice(0, 300) });
+    const raw = (response.content.find(b => b.type === "text")?.text || "").trim();
+    console.log("[Competitors] Raw:", raw.slice(0, 200));
+
+    const arrayMatch = raw.match(/\[[\s\S]*?\]/);
+    if (!arrayMatch) return res.status(500).json({ error: "No JSON array found in response", raw: raw.slice(0, 200) });
     const competitors = JSON.parse(arrayMatch[0]);
     res.json({ competitors });
   } catch (err) {
@@ -882,8 +869,6 @@ app.post("/api/competitors/find", async (req, res) => {
     res.status(500).json({ error: "Failed to find competitors", detail: err.message });
   }
 });
-
-
 app.put("/api/clients/:id/competitors", async (req, res) => {
   const { id } = req.params;
   const { competitors } = req.body;
