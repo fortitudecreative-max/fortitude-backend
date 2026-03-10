@@ -372,7 +372,7 @@ app.post("/api/images/upload", upload.single("image"), async (req, res) => {
 // ─── CLIENT LOGO UPLOAD ──────────────────────────────────────────
 // ── POST /api/clients/:id/detect-seo-caps ────────────────────────────
 // Re-probes the client WP site and saves Yoast capability snapshot to Supabase.
-app.post("/api/clients/:id/detect-seo-caps", authenticateToken, async (req, res) => {
+app.post("/api/clients/:id/detect-seo-caps", requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     const { data: client } = await supabase.from("clients")
