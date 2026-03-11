@@ -1133,107 +1133,181 @@ app.put("/api/clients/:id/competitors", async (req, res) => {
 });
 
 // ─── MONTHLY KEYWORD REFRESH ──────────────────────────────────────
+// ─── SHARED: build exclusion set (used keywords + current queue) ─────────────
+async function buildExclusionSet(clientId) {
+  const [{ data: usedRows }, { data: queueRows }] = await Promise.all([
+    supabase.from("client_used_keywords").select("keyword").eq("client_id", clientId),
+    supabase.from("client_keyword_queue").select("keyword").eq("client_id", clientId),
+  ]);
+  const set = new Set();
+  (usedRows || []).forEach(r => set.add(r.keyword.toLowerCase()));
+  (queueRows || []).forEach(r => set.add(r.keyword.toLowerCase()));
+  return set;
+}
+
+// ─── SHARED: generate research keywords (library + AI fallback) ───────────────
+async function generateResearchKeywords(client, count, excludeSet) {
+  const Anthropic = require("@anthropic-ai/sdk");
+  const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+  // Parse industry_tags — e.g. "hvac, plumbing" → ["hvac","plumbing"]
+  const tags = (client.industry_tags || client.industry || "")
+    .split(/[,\s]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+
+  let libKeywords = [];
+  if (tags.length > 0) {
+    // Fetch from library for each tag and merge
+    const allLib = [];
+    for (const tag of tags) {
+      const { data } = await supabase.from("keyword_library")
+        .select("*").ilike("industry", `%${tag}%`)
+        .order("volume", { ascending: false }).limit(count + 40);
+      if (data) allLib.push(...data);
+    }
+    // Deduplicate by keyword text
+    const seen = new Set();
+    libKeywords = allLib.filter(k => {
+      const lc = k.keyword.toLowerCase();
+      if (seen.has(lc) || excludeSet.has(lc)) return false;
+      seen.add(lc);
+      return true;
+    }).slice(0, count).map(k => ({ keyword: k.keyword, volume: k.volume || 0, intent: k.intent || "Informational", source: "library" }));
+  }
+
+  if (libKeywords.length >= count) return libKeywords.slice(0, count);
+
+  // AI fallback for remainder
+  const stillNeeded = count - libKeywords.length;
+  const existingList = [...excludeSet, ...libKeywords.map(k => k.keyword.toLowerCase())].slice(0, 30).join(", ");
+  try {
+    const msg = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: `You are an SEO expert. Generate ${stillNeeded} high-intent blog keyword phrases for a ${client.industry_tags || client.industry} business called "${client.name}"${client.service_area ? ` located in ${client.service_area}` : ""}${client.domain ? ` with website ${client.domain}` : ""}. Focus on: local service keywords, how-to guides, cost/pricing, emergency services, and comparison keywords. Do NOT use any of these already-used keywords: ${existingList}. Respond with ONLY a raw JSON array of ${stillNeeded} strings. No markdown, no explanation.` }],
+    });
+    const tb = msg.content.find(b => b.type === "text");
+    if (tb) {
+      const parsed = JSON.parse(tb.text.trim().replace(/\`\`\`json|\`\`\`/g, "").trim());
+      const aiKws = parsed.filter(kw => !excludeSet.has(kw.toLowerCase()) && !libKeywords.find(l => l.keyword.toLowerCase() === kw.toLowerCase()))
+        .slice(0, stillNeeded).map(kw => ({ keyword: kw, volume: 0, intent: "Informational", source: "ai" }));
+      libKeywords = [...libKeywords, ...aiKws];
+    }
+  } catch(e) { console.log("AI research fallback error:", e.message); }
+  return libKeywords.slice(0, count);
+}
+
+// ─── SHARED: generate competitor gap keywords ─────────────────────────────────
+async function generateGapKeywords(client, count, excludeSet) {
+  const Anthropic = require("@anthropic-ai/sdk");
+  const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+  const competitors = client.competitors || [];
+  if (competitors.length === 0) return [];
+
+  const usedList = [...excludeSet].slice(0, 30).join(", ");
+  // Run 3 targeted searches to get diverse gap keywords
+  const prompts = [
+    `Competitor websites: ${competitors.join(", ")}. Generate ${Math.ceil(count/2)} high-intent ${client.industry_tags || client.industry} keyword phrases that a competitor "${client.name}"${client.service_area ? ` in ${client.service_area}` : ""} is likely ranking for. Focus on local service + transactional terms. NOT any of: ${usedList}. ONLY a raw JSON array. No markdown.`,
+    `Competitor websites: ${competitors.join(", ")}. Generate ${Math.floor(count/2)} additional ${client.industry_tags || client.industry} keyword gaps focusing on pricing, comparison, emergency, or seasonal terms that "${client.name}" should capture from competitors. NOT any of: ${usedList}. ONLY a raw JSON array. No markdown.`,
+  ];
+
+  const results = [];
+  for (const prompt of prompts) {
+    try {
+      const msg = await anthropic.messages.create({
+        model: "claude-sonnet-4-20250514", max_tokens: 800,
+        messages: [{ role: "user", content: prompt }],
+      });
+      const tb = msg.content.find(b => b.type === "text");
+      if (tb) {
+        const parsed = JSON.parse(tb.text.trim().replace(/\`\`\`json|\`\`\`/g, "").trim());
+        results.push(...parsed);
+      }
+    } catch(e) { console.log("Gap gen error:", e.message); }
+  }
+
+  const seen = new Set();
+  return results.filter(kw => {
+    const lc = kw.toLowerCase();
+    if (seen.has(lc) || excludeSet.has(lc)) return false;
+    seen.add(lc);
+    return true;
+  }).slice(0, count).map(kw => ({ keyword: kw, volume: 0, intent: "Transactional", source: "gap" }));
+}
+
+// ─── REGENERATE QUEUE: fills both research (15) and gap (15) ─────────────────
 app.post("/api/keywords/monthly-refresh/:clientId", async (req, res) => {
   const { clientId } = req.params;
   try {
     const { data: client } = await supabase.from("clients").select("*").eq("id", clientId).single();
     if (!client) return res.status(404).json({ error: "Client not found" });
 
-    const Anthropic = require("@anthropic-ai/sdk");
-    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
     const month = new Date().toISOString().slice(0, 7);
+    const excludeSet = await buildExclusionSet(clientId);
 
-    await supabase.from("client_keyword_queue").delete().eq("client_id", clientId).eq("month", month);
+    const [researchKws, gapKws] = await Promise.all([
+      generateResearchKeywords(client, 15, excludeSet),
+      generateGapKeywords(client, 15, excludeSet),
+    ]);
 
-    const competitors = client.competitors || [];
-    let gapKeywords = [];
-
-    if (competitors.length > 0) {
-      const message = await anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
-        messages: [{
-          role: "user",
-          content: `You are an SEO expert. Based on these ${client.industry} competitor websites: ${competitors.join(", ")}, generate 15 high-intent keyword phrases that a competing ${client.industry} business called "${client.name}" should target. Focus on: local service keywords, emergency service terms, cost/pricing keywords, how-to guides, and comparison keywords. You MUST respond with ONLY a raw JSON array of 15 strings. No explanation, no markdown, no preamble. Example: ["ac repair charlotte nc","hvac tune up cost","emergency furnace repair"]`
-        }],
-      });
-
-      const textBlock = message.content.find(b => b.type === "text");
-      if (textBlock) {
-        try {
-          const clean = textBlock.text.trim().replace(/```json|```/g, "").trim();
-          const parsed = JSON.parse(clean);
-          gapKeywords = parsed.slice(0, 15).map(kw => ({ keyword: kw, source: "gap", intent: "Transactional" }));
-        } catch(e) {
-          console.log("Gap keyword parse error:", e.message, "Raw:", textBlock.text.slice(0, 200));
-        }
-      }
-    }
-
-    const needed = 30 - gapKeywords.length;
-    const { data: libraryKeywords } = await supabase.from("keyword_library")
-      .select("*").ilike("industry", client.industry)
-      .order("volume", { ascending: false })
-      .limit(needed + 20);
-
-    const gapSet = new Set(gapKeywords.map(k => k.keyword.toLowerCase()));
-    const libraryFill = (libraryKeywords || [])
-      .filter(k => !gapSet.has(k.keyword.toLowerCase()))
-      .slice(0, needed)
-      .map(k => ({ keyword: k.keyword, volume: k.volume, intent: k.intent, source: "library" }));
-
-    let allKeywords = [...gapKeywords, ...libraryFill];
-
-    // AI fallback: if we still need more keywords, generate them with Claude
-    if (allKeywords.length < 15) {
-      const stillNeeded = 30 - allKeywords.length;
-      const existingSet = new Set(allKeywords.map(k => k.keyword.toLowerCase()));
-      try {
-        const aiFallbackMsg = await anthropic.messages.create({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          messages: [{
-            role: "user",
-            content: `You are an SEO expert. Generate ${stillNeeded} high-intent keyword phrases for a ${client.industry} business called "${client.name}"${client.domain ? ` with website ${client.domain}` : ""}. Focus on: local service keywords, emergency service terms, cost/pricing keywords, how-to guides, and comparison keywords. You MUST respond with ONLY a raw JSON array of ${stillNeeded} strings. No explanation, no markdown, no preamble. Example: ["ac repair near me","hvac tune up cost","emergency furnace repair"]`
-          }],
-        });
-        const textBlock = aiFallbackMsg.content.find(b => b.type === "text");
-        if (textBlock) {
-          const clean = textBlock.text.trim().replace(/```json|```/g, "").trim();
-          const parsed = JSON.parse(clean);
-          const aiKeywords = parsed
-            .filter(kw => !existingSet.has(kw.toLowerCase()))
-            .slice(0, stillNeeded)
-            .map(kw => ({ keyword: kw, source: "ai", intent: "Transactional" }));
-          allKeywords = [...allKeywords, ...aiKeywords];
-          console.log(`AI fallback generated ${aiKeywords.length} keywords for ${client.name}`);
-        }
-      } catch(e) {
-        console.log("AI fallback keyword error:", e.message);
-      }
-    }
-
-    const inserts = allKeywords.map(k => ({
-      client_id: clientId,
-      keyword: k.keyword,
-      volume: k.volume || 0,
-      intent: k.intent || "Transactional",
-      source: k.source,
-      month,
-      used: false,
-    }));
-
-    if (inserts.length === 0) {
+    const allKeywords = [...researchKws, ...gapKws];
+    if (allKeywords.length === 0) {
       return res.status(400).json({ error: `Failed to generate keywords for "${client.name}". Please try again.` });
     }
-
+    const inserts = allKeywords.map(k => ({
+      client_id: clientId, keyword: k.keyword, volume: k.volume || 0,
+      intent: k.intent || "Informational", source: k.source, month, used: false,
+    }));
     await supabase.from("client_keyword_queue").insert(inserts);
     await supabase.from("clients").update({ next_keyword_index: 0 }).eq("id", clientId);
-
-    res.json({ success: true, total: inserts.length, gap: gapKeywords.length, library: libraryFill.length });
+    res.json({ success: true, total: inserts.length, research: researchKws.length, gap: gapKws.length });
   } catch (err) {
-    console.error("Monthly refresh error:", err.message);
-    res.status(500).json({ error: "Failed to refresh keywords", detail: err.message });
+    console.error("Regenerate queue error:", err.message);
+    res.status(500).json({ error: "Failed to regenerate queue", detail: err.message });
+  }
+});
+
+// ─── REFRESH RESEARCH ONLY (library + AI, no gap) ────────────────────────────
+app.post("/api/keywords/queue/refresh-research/:clientId", requireAuth, async (req, res) => {
+  const { clientId } = req.params;
+  try {
+    const { data: client } = await supabase.from("clients").select("*").eq("id", clientId).single();
+    if (!client) return res.status(404).json({ error: "Client not found" });
+    const month = new Date().toISOString().slice(0, 7);
+    const excludeSet = await buildExclusionSet(clientId);
+    const keywords = await generateResearchKeywords(client, 15, excludeSet);
+    if (keywords.length === 0) return res.status(400).json({ error: "No new research keywords found" });
+    const inserts = keywords.map(k => ({
+      client_id: clientId, keyword: k.keyword, volume: k.volume || 0,
+      intent: k.intent || "Informational", source: k.source, month, used: false,
+    }));
+    await supabase.from("client_keyword_queue").insert(inserts);
+    res.json({ success: true, added: inserts.length, keywords: inserts });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── REFRESH GAP ONLY (competitor analysis) ──────────────────────────────────
+app.post("/api/keywords/queue/refresh-gap/:clientId", requireAuth, async (req, res) => {
+  const { clientId } = req.params;
+  try {
+    const { data: client } = await supabase.from("clients").select("*").eq("id", clientId).single();
+    if (!client) return res.status(404).json({ error: "Client not found" });
+    if (!client.competitors || client.competitors.length === 0) {
+      return res.status(400).json({ error: "No competitors listed for this client. Add competitors first." });
+    }
+    const month = new Date().toISOString().slice(0, 7);
+    const excludeSet = await buildExclusionSet(clientId);
+    const keywords = await generateGapKeywords(client, 15, excludeSet);
+    if (keywords.length === 0) return res.status(400).json({ error: "No new competitor gap keywords found" });
+    const inserts = keywords.map(k => ({
+      client_id: clientId, keyword: k.keyword, volume: k.volume || 0,
+      intent: k.intent || "Transactional", source: k.source, month, used: false,
+    }));
+    await supabase.from("client_keyword_queue").insert(inserts);
+    res.json({ success: true, added: inserts.length, keywords: inserts });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
