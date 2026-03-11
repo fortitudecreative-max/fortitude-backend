@@ -1482,10 +1482,26 @@ app.post("/api/schedule/add", async (req, res) => {
   const { clientId, keyword } = req.body;
   if (!clientId || !keyword) return res.status(400).json({ error: "clientId and keyword required" });
   try {
-    // Schedule for tomorrow at 8:45am EST (same as daily cron)
-    const scheduledTime = new Date();
-    scheduledTime.setDate(scheduledTime.getDate() + 1);
-    scheduledTime.setHours(13, 45, 0, 0); // 8:45am EST = 13:45 UTC
+    const { data: client } = await supabase.from("clients").select("schedule_start_hour,schedule_end_hour").eq("id", clientId).single();
+    const startHour = client?.schedule_start_hour || 9;
+    const endHour = client?.schedule_end_hour || 12;
+    const windowMinutes = Math.max(1, (endHour - startHour) * 60);
+    const randMinutes = Math.floor(Math.random() * windowMinutes);
+    // Schedule for tomorrow within the client's publish window
+    const TZ = "America/New_York";
+    const nowUTC = new Date();
+    const estOffsetMs = nowUTC.getTime() - new Date(nowUTC.toLocaleString("en-US", { timeZone: TZ })).getTime();
+    const estOffsetHours = estOffsetMs / 3600000;
+    const tomorrow = new Date(nowUTC);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tParts = new Intl.DateTimeFormat("en-US", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" })
+      .formatToParts(tomorrow).reduce((a, p) => { a[p.type] = p.value; return a; }, {});
+    const sign = estOffsetHours <= 0 ? "-" : "+";
+    const absH = String(Math.floor(Math.abs(estOffsetHours))).padStart(2, "0");
+    const absM = String(Math.round((Math.abs(estOffsetHours) % 1) * 60)).padStart(2, "0");
+    const hh = String(startHour).padStart(2, "0");
+    const scheduledTime = new Date(`${tParts.year}-${tParts.month}-${tParts.day}T${hh}:00:00${sign}${absH}:${absM}`);
+    scheduledTime.setMinutes(scheduledTime.getMinutes() + randMinutes);
     const { data, error } = await supabase.from("scheduled_jobs").insert([{
       client_id: clientId,
       keyword,
@@ -2718,7 +2734,7 @@ const scheduleDailyPosts = async () => {
     }
   }
 };
-cron.schedule("45 13 * * *", scheduleDailyPosts); // 8:45am EST (UTC-5) / 9:45am EDT (UTC-4)
+cron.schedule("0 5 * * *", scheduleDailyPosts); // Midnight EST (5am UTC in EST / 4am UTC in EDT — fires before any publish window)
 
 cron.schedule("0 12 1 * *", async () => { // 7am EST on the 1st of each month
   console.log("📅 Monthly keyword refresh starting...");
@@ -2730,7 +2746,7 @@ cron.schedule("0 12 1 * *", async () => { // 7am EST on the 1st of each month
     } catch (e) { console.error("Monthly refresh failed for " + client.name + ":", e.message); }
   }
 });
-console.log("✓ Scheduler initialized — runs daily at 8:45am EST");
+console.log("✓ Scheduler initialized — runs daily at midnight EST (5am UTC), publishes within each client's window");
 
 // ─── SEO AUDIT ENGINE ────────────────────────────────────────────
 
