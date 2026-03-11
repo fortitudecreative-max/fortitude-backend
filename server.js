@@ -967,6 +967,21 @@ app.post("/api/publish/wordpress", async (req, res) => {
         // Remove from monthly keyword queue
         await supabase.from("client_keyword_queue")
           .delete().eq("client_id", clientId).ilike("keyword", keyword.trim());
+
+        // Insert a published row into scheduled_jobs so it appears in Archived Posts
+        // (manual publishes don't have a pre-existing scheduled_jobs row)
+        const existingJob = await supabase.from("scheduled_jobs")
+          .select("id").eq("client_id", clientId).eq("wp_post_id", wpPost.id).single();
+        if (!existingJob.data) {
+          await supabase.from("scheduled_jobs").insert([{
+            client_id: clientId,
+            keyword: keyword.trim(),
+            scheduled_time: new Date().toISOString(),
+            status: "published",
+            wp_post_id: wpPost.id,
+            published_url: wpPost.link || null,
+          }]);
+        }
       } catch(e) { console.error("Used keyword hook error:", e.message); }
     }
     res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta, yoastOpt: yoastOptResult });
