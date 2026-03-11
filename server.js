@@ -992,6 +992,65 @@ app.post("/api/publish/wordpress", async (req, res) => {
   }
 });
 
+// ─── YOAST RECALC ENDPOINT ────────────────────────────────────────────────────
+// Triggers a no-op PUT on a WP post which forces Yoast to recompute ALL scores.
+// This is what actually turns the grey dots green in the WP Posts Overview.
+// Accepts { clientId, wpPostId }
+// ─────────────────────────────────────────────────────────────────────────────
+app.post("/api/yoast-recalc", requireAuth, async (req, res) => {
+  const { clientId, wpPostId } = req.body;
+  if (!clientId || !wpPostId) return res.status(400).json({ error: "clientId and wpPostId required" });
+  try {
+    const { data: client } = await supabase.from("clients").select("*").eq("id", clientId).single();
+    if (!client?.wordpress_url || !client?.wordpress_username || !client?.wordpress_password) {
+      return res.status(400).json({ error: "WordPress credentials not set" });
+    }
+    const wpBase = client.wordpress_url.replace(/\/$/, "");
+    const authHeaders = {
+      "Authorization": "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64"),
+      "Content-Type": "application/json",
+    };
+    const seoCaps = await detectSeoCapabilities(wpBase, authHeaders);
+
+    // Step 1: Fortitude plugin recalc (most direct)
+    let recalcOk = false;
+    if (seoCaps?.fortitudePlugin) {
+      try {
+        const r = await axios.post(`${wpBase}/wp-json/fortitude/v1/yoast-recalc`,
+          { post_id: parseInt(wpPostId) },
+          { headers: authHeaders, httpsAgent, timeout: 10000 });
+        if (r.data?.success || r.status === 200) {
+          recalcOk = true;
+          console.log(`[Recalc] Fortitude recalc OK for post ${wpPostId}`);
+        }
+      } catch(e) { console.log("[Recalc] Fortitude recalc error:", e.message); }
+    }
+
+    // Step 2: No-op PUT — fires wp_update_post hooks, forces Yoast to recompute indexables
+    await new Promise(r => setTimeout(r, 500));
+    await axios.post(`${wpBase}/wp-json/wp/v2/posts/${wpPostId}`,
+      { status: "publish" },
+      { headers: authHeaders, httpsAgent, timeout: 10000 });
+    console.log(`[Recalc] No-op PUT fired for post ${wpPostId}`);
+
+    // Step 3: Second Fortitude recalc after PUT to lock in final scores
+    if (seoCaps?.fortitudePlugin) {
+      try {
+        await new Promise(r => setTimeout(r, 800));
+        await axios.post(`${wpBase}/wp-json/fortitude/v1/yoast-recalc`,
+          { post_id: parseInt(wpPostId) },
+          { headers: authHeaders, httpsAgent, timeout: 10000 });
+        console.log(`[Recalc] Second Fortitude recalc OK for post ${wpPostId}`);
+      } catch(e) {}
+    }
+
+    res.json({ success: true, recalcOk });
+  } catch (err) {
+    console.error("[Recalc] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── MANUAL YOAST OPTIMIZE ENDPOINT ──────────────────────────────────────────
 // Called by the "Re-run Yoast Fix" button in the publish banner.
 // Accepts { clientId, wpPostId, title, keyword, metaDescription }
