@@ -1551,7 +1551,7 @@ app.get("/api/schedule/:clientId", async (req, res) => {
     .select("*")
     .eq("client_id", clientId)
     .order("scheduled_time", { ascending: false })
-    .limit(10);
+    .limit(200);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ jobs: data });
 });
@@ -2701,7 +2701,7 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
     }
 
     console.log(`✓ Scheduled post published for ${client.name}: "${post.title}"`);
-    return wpRes.data.id;
+    return { id: wpRes.data.id, link: wpRes.data.link || '' };
   } catch (err) {
     console.error(`✗ Scheduled post failed for ${client.name}:`, err.message);
     throw err;
@@ -2791,8 +2791,10 @@ const scheduleDailyPosts = async () => {
         setTimeout(async () => {
           try {
             await supabase.from("scheduled_jobs").update({ status: "running" }).eq("id", job.id);
-            const wpPostId = await publishPostForClient(client, keyword);
-            await supabase.from("scheduled_jobs").update({ status: "published", wp_post_id: wpPostId }).eq("id", job.id);
+            const wpResult = await publishPostForClient(client, keyword);
+            const wpPostId = wpResult.id || wpResult;
+            const wpPostUrl = wpResult.link || '';
+            await supabase.from("scheduled_jobs").update({ status: "published", wp_post_id: wpPostId, published_url: wpPostUrl }).eq("id", job.id);
             // Auto-add to client used keywords
             try {
               const { data: eu } = await supabase.from("client_used_keywords").select("id").eq("client_id", client.id).eq("keyword", keyword.trim()).single();
