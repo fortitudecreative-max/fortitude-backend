@@ -1026,12 +1026,22 @@ app.post("/api/yoast-recalc", requireAuth, async (req, res) => {
       } catch(e) { console.log("[Recalc] Fortitude recalc error:", e.message); }
     }
 
-    // Step 2: No-op PUT — fires wp_update_post hooks, forces Yoast to recompute indexables
+    // Step 2: Force a real WP update by fetching the post first, then re-sending its content.
+    // A plain { status: "publish" } PUT may be a no-op if WP detects nothing changed.
+    // Re-POSTing the actual content forces wp_update_post hooks to fire, which triggers Yoast.
     await new Promise(r => setTimeout(r, 500));
+    let postContent = "publish";
+    try {
+      const fetchRes = await axios.get(`${wpBase}/wp-json/wp/v2/posts/${wpPostId}?context=edit`, {
+        headers: authHeaders, httpsAgent, timeout: 10000
+      });
+      postContent = fetchRes.data?.content?.raw || "publish";
+    } catch(e) { console.log("[Recalc] Could not fetch post content, using minimal PUT"); }
+
     await axios.post(`${wpBase}/wp-json/wp/v2/posts/${wpPostId}`,
-      { status: "publish" },
-      { headers: authHeaders, httpsAgent, timeout: 10000 });
-    console.log(`[Recalc] No-op PUT fired for post ${wpPostId}`);
+      { status: "publish", content: postContent },
+      { headers: authHeaders, httpsAgent, timeout: 20000 });
+    console.log(`[Recalc] Content PUT fired for post ${wpPostId}`);
 
     // Step 3: Second Fortitude recalc after PUT to lock in final scores
     if (seoCaps?.fortitudePlugin) {
