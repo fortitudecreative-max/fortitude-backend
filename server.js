@@ -977,6 +977,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
             client_id: clientId,
             keyword: keyword.trim(),
             scheduled_time: new Date().toISOString(),
+            published_at: new Date().toISOString(),
             status: "published",
             wp_post_id: wpPost.id,
             published_url: wpPost.link || null,
@@ -2833,7 +2834,7 @@ const scheduleDailyPosts = async () => {
             const wpResult = await publishPostForClient(client, keyword);
             const wpPostId = wpResult.id || wpResult;
             const wpPostUrl = wpResult.link || '';
-            await supabase.from("scheduled_jobs").update({ status: "published", wp_post_id: wpPostId, published_url: wpPostUrl }).eq("id", job.id);
+            await supabase.from("scheduled_jobs").update({ status: "published", published_at: new Date().toISOString(), wp_post_id: wpPostId, published_url: wpPostUrl }).eq("id", job.id);
             // Auto-add to client used keywords
             try {
               const { data: eu } = await supabase.from("client_used_keywords").select("id").eq("client_id", client.id).eq("keyword", keyword.trim()).single();
@@ -2846,7 +2847,7 @@ const scheduleDailyPosts = async () => {
         }, msUntilPublish);
       } else {
         await publishPostForClient(client, keyword);
-        await supabase.from("scheduled_jobs").update({ status: "published" }).eq("id", job.id);
+        await supabase.from("scheduled_jobs").update({ status: "published", published_at: new Date().toISOString() }).eq("id", job.id);
       }
     } catch (err) {
       console.error(`Scheduler error for ${client.name}:`, err.message);
