@@ -524,7 +524,7 @@ ${existingContentPrompt}
 Return your response as JSON with exactly this structure:
 {
   "title": "SEO optimized blog post title — STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
-  "metaDescription": "Meta description — HARD limit: MAXIMUM 60 characters total (count every character including spaces). Count twice before finalizing. Do NOT exceed 60 — trim the end if needed. Keep it punchy and include the target keyword.",
+  "metaDescription": "Meta description — STRICT MAXIMUM 60 characters total including spaces. Count character by character before submitting — if it is over 60 characters, shorten it before returning. Keep it punchy and include the target keyword.",
   "slug": "url-friendly-slug",
   "content": "Full HTML only — NO markdown whatsoever. Use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <a> tags exclusively. Never use **, --, ##, or any markdown syntax. All bullet points must be <ul><li> HTML. All bold must be <strong>. Minimum 800 words.",
   "wordCount": estimated word count as integer,
@@ -559,9 +559,40 @@ Return only the JSON, no other text.`;
 
     // Safety net: convert any markdown that slipped through
     post.content = markdownToHtml(post.content);
-    // Safety net: enforce 60-char meta desc hard limit
+
+    // Meta description retry loop — never truncate, always regenerate if over 60
     if (post.metaDescription && post.metaDescription.length > 60) {
-      post.metaDescription = post.metaDescription.slice(0, 57).trimEnd() + "...";
+      let metaAttempts = 0;
+      while (post.metaDescription.length > 60 && metaAttempts < 3) {
+        metaAttempts++;
+        console.log(`[Meta] Over 60 chars (${post.metaDescription.length}) — retry ${metaAttempts}: "${post.metaDescription}"`);
+        try {
+          const metaRetry = await client.messages.create({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 100,
+            messages: [{ role: "user", content: `Rewrite this meta description so it is UNDER 60 characters total (including spaces). It must still include the keyword "${keyword}" and convey the same meaning. Count every character carefully — do not exceed 60. Return ONLY the new meta description text, no quotes, no explanation.
+
+Current (${post.metaDescription.length} chars): ${post.metaDescription}` }],
+          });
+          const newMeta = metaRetry.content[0]?.text?.trim().replace(/^["']|["']$/g, "") || "";
+          if (newMeta.length > 0 && newMeta.length <= 60) {
+            post.metaDescription = newMeta;
+            console.log(`[Meta] Retry ${metaAttempts} succeeded: "${newMeta}" (${newMeta.length} chars)`);
+          } else {
+            console.log(`[Meta] Retry ${metaAttempts} still over 60 (${newMeta.length}): "${newMeta}"`);
+          }
+        } catch(e) {
+          console.log("[Meta] Retry error:", e.message);
+          break;
+        }
+      }
+      // Last resort: if still over 60 after 3 retries, trim at last space before 60
+      if (post.metaDescription.length > 60) {
+        const trimmed = post.metaDescription.slice(0, 60);
+        const lastSpace = trimmed.lastIndexOf(" ");
+        post.metaDescription = lastSpace > 30 ? trimmed.slice(0, lastSpace) : trimmed;
+        console.log(`[Meta] Hard-trimmed at word boundary: "${post.metaDescription}"`);
+      }
     }
 
     // Build all schema blocks (Article + HowTo if applicable + FAQPage) + visible HTML sections
@@ -2068,7 +2099,7 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
           messages: [{ role: "user", content: metaPrompt }]
         });
         const newMeta = msg.content[0].text.trim().replace(/^["']|["']$/g, "");
-        if (newMeta.length >= 20 && newMeta.length <= 60) {
+        if (newMeta.length > 0 && newMeta.length <= 60) {
           currentMeta = newMeta; metaChanged = true;
           fixes.push({ pass, type: "meta_length", fix: `Trimmed to ${newMeta.length} chars` });
           log(`Fixed meta: ${newMeta.length} chars`);
@@ -2369,7 +2400,7 @@ This protects the business's service revenue while keeping content SEO-valuable.
 
 Return ONLY valid JSON with these exact fields:
 - title: SEO title — STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
-- metaDescription: meta description — HARD limit: MAXIMUM 60 characters total including spaces. Count every character. Do NOT exceed 60 — keep it short and punchy.
+- metaDescription: meta description — STRICT MAXIMUM 60 characters total including spaces. Count character by character. If it exceeds 60, shorten it before returning. Keep it punchy.
 - slug: URL slug (lowercase, hyphens)
 - content: pure HTML body using <h2>, <h3>, <p>, <ul>, <li>, <strong>, <a> tags ONLY. NO markdown whatsoever.
 - wordCount: integer word count
@@ -2441,7 +2472,7 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
 
     // ── Yoast meta: full-caps detection + 3-path write (same as manual publish) ────
     const schSafeMetaDesc = (post.metaDescription || "").length > 60
-      ? (post.metaDescription || "").slice(0, 57).trimEnd() + "..."
+      ? (post.metaDescription || "").slice(0, 60)
       : (post.metaDescription || "");
     const schLongtailKw = makeLongtailKeyphrase(keyword);
     let schSeoCaps = { yoast: "none", fortitudePlugin: false, canWriteSeoMeta: false, restMetaKeys: false, indexablesApi: false };
@@ -3772,7 +3803,7 @@ app.post("/api/seo/fix", async (req, res) => {
           const text = ph.replace(/<[^>]+>/g," ").trim().slice(0, 1500);
           const cur = ph.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim() || "";
           val = await ai(`Write an SEO title tag. 50-60 chars, include primary keyword. ${cur ? `Current: "${cur}". ` : ""}Content: "${text.slice(0,800)}". Return ONLY the title.`, 200);
-          if (val.length > 60) val = val.slice(0, 57) + "...";
+          if (val.length > 60) { const t = val.slice(0, 60); const ls = t.lastIndexOf(" "); val = ls > 30 ? t.slice(0, ls) : t; }
         }
         ctx.val = val;
         return [
