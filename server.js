@@ -1157,6 +1157,47 @@ app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
 });
 
 
+// ── Delete archived post ──────────────────────────────────────────────────────
+// Deletes row from scheduled_jobs and optionally trashes the WP post
+app.delete("/api/schedule/:jobId", requireAuth, async (req, res) => {
+  const { jobId } = req.params;
+  const { trashWp } = req.query; // ?trashWp=1 to also trash on WordPress
+  try {
+    // Fetch the job first so we have wp_post_id + client_id
+    const { data: job, error: fetchErr } = await supabase
+      .from("scheduled_jobs").select("*").eq("id", jobId).single();
+    if (fetchErr || !job) return res.status(404).json({ error: "Job not found" });
+
+    // Optionally trash on WordPress
+    if (trashWp === "1" && job.wp_post_id) {
+      try {
+        const { data: client } = await supabase.from("clients").select("*").eq("id", job.client_id).single();
+        if (client?.wordpress_url && client?.wordpress_username && client?.wordpress_password) {
+          const wpBase = client.wordpress_url.replace(/\/$/, "");
+          const authHeaders = {
+            "Authorization": "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64"),
+            "Content-Type": "application/json",
+          };
+          await axios.delete(`${wpBase}/wp-json/wp/v2/posts/${job.wp_post_id}`,
+            { headers: authHeaders, httpsAgent, timeout: 10000 });
+          console.log(`[Delete] Trashed WP post ${job.wp_post_id}`);
+        }
+      } catch(e) {
+        console.log(`[Delete] WP trash failed (non-fatal): ${e.message}`);
+      }
+    }
+
+    // Delete from scheduled_jobs
+    const { error: delErr } = await supabase.from("scheduled_jobs").delete().eq("id", jobId);
+    if (delErr) return res.status(500).json({ error: delErr.message });
+
+    res.json({ success: true, jobId, wpTrashed: trashWp === "1" && !!job.wp_post_id });
+  } catch (err) {
+    console.error("[Delete] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── One-time backfill: insert published rows into scheduled_jobs ──────────────
 app.post("/api/admin/backfill-published", requireAuth, async (req, res) => {
   const { rows } = req.body; // [{ client_id, keyword, wp_post_id, published_url, scheduled_time }]
