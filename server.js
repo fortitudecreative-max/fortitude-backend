@@ -1115,55 +1115,36 @@ app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
       "Authorization": "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64"),
       "Content-Type": "application/json",
     };
+    const seoCaps = await detectSeoCapabilities(wpBase, authHeaders);
 
-    // Fetch the post
+    // Primary method: ask Fortitude plugin for actual stored Yoast scores
+    if (seoCaps?.fortitudePlugin) {
+      try {
+        const r = await axios.post(`${wpBase}/wp-json/fortitude/v1/yoast-recalc`,
+          { post_id: parseInt(postId) },
+          { headers: authHeaders, httpsAgent, timeout: 15000 });
+        const scores = r.data?.scores_after || {};
+        const seo = parseInt(scores.primary_focus_keyword_score || 0);
+        const read = parseInt(scores.readability_score || 0);
+        // Yoast: >= 50 = orange, >= 75 = green. We treat >= 50 as passing.
+        const green = seo >= 50 && read >= 50;
+        console.log(`[YoastCheck] Post ${postId}: seo=${seo} read=${read} green=${green}`);
+        return res.json({ green, seo_score: seo, readability_score: read, source: "fortitude_plugin" });
+      } catch(e) {
+        console.log("[YoastCheck] Plugin check failed:", e.message);
+      }
+    }
+
+    // Fallback: check yoast_head_json for presence of title + description as proxy for good setup
     const postRes = await axios.get(`${wpBase}/wp-json/wp/v2/posts/${postId}?context=edit`, {
       headers: authHeaders, httpsAgent
     });
     const post = postRes.data;
-    const html = post?.content?.raw || "";
-    const title = post?.yoast_head_json?.title || post?.title?.rendered || "";
-    const metadesc = post?.yoast_head_json?.description || "";
-
-    // Fetch keyword from scheduled_jobs
-    const { data: job } = await supabase
-      .from("scheduled_jobs")
-      .select("keyword")
-      .eq("client_id", clientId)
-      .eq("wp_post_id", parseInt(postId))
-      .single();
-    const keyword = job?.keyword || "";
-
-    if (!keyword) return res.json({ green: false, issues: ["No keyword found for post"] });
-
-    // Run the same checkIssues logic
-    const kwLower = keyword.toLowerCase();
-    const kwWords = kwLower.split(/\s+/);
-    const textOnly = html.replace(/<[^>]+>/g, " ").toLowerCase();
-    const wordCount = textOnly.split(/\s+/).filter(Boolean).length;
-
-    const issues = [];
-
-    // Keyphrase density
-    let kwCount = 0, pos = 0;
-    while ((pos = textOnly.indexOf(kwLower, pos)) !== -1) { kwCount++; pos += kwLower.length; }
-    const minOccurrences = Math.max(5, Math.floor(wordCount / 300));
-    if (kwCount < minOccurrences) issues.push(`Low density (${kwCount}/${minOccurrences})`);
-
-    // Keyphrase in title
-    const titleLower = title.replace(/ - %%sitename%%/, "").toLowerCase();
-    const missingInTitle = kwWords.filter(w => !titleLower.includes(w));
-    if (missingInTitle.length > 0) issues.push(`Missing in title: ${missingInTitle.join(", ")}`);
-
-    // Keyphrase in subheadings
-    const headings = [...html.matchAll(/<h[23][^>]*>(.*?)<\/h[23]>/gi)].map(m => m[1].replace(/<[^>]+>/g, "").toLowerCase());
-    const hasKwInHeading = headings.some(h => kwWords.some(w => h.includes(w)));
-    if (!hasKwInHeading) issues.push("Missing in subheadings");
-
-    // Meta description length
-    if (metadesc.length < 120 || metadesc.length > 156) issues.push(`Meta desc length ${metadesc.length} (need 120-156)`);
-
-    res.json({ green: issues.length === 0, issues, keyword, wordCount });
+    const hasTitle = !!(post?.yoast_head_json?.title);
+    const hasDesc = !!(post?.yoast_head_json?.description);
+    const focuskw = post?.meta?._yoast_wpseo_focuskw || "";
+    const green = hasTitle && hasDesc && focuskw.length > 0;
+    return res.json({ green, source: "fallback", hasTitle, hasDesc, hasFocusKw: focuskw.length > 0 });
   } catch (err) {
     console.error("[YoastCheck] Error:", err.message);
     res.status(500).json({ error: err.message });
