@@ -837,7 +837,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
     }
 
     if (postId) {
-      await supabase.from("posts").update({ status: "published", published_at: new Date().toISOString() }).eq("id", postId);
+      await supabase.from("posts").update({ status: "published", published_at: new Date().toISOString(), wp_url: wpPost.link || "" }).eq("id", postId);
     }
     if (clientId) {
       const { data: client } = await supabase.from("clients").select("posts_published").eq("id", clientId).single();
@@ -1015,8 +1015,74 @@ app.post("/api/yoast-optimize", async (req, res) => {
     console.error("[YoastOpt/Manual] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
-});
 
+// ── Yoast green-light check for a published post ─────────────────────────────
+app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
+  const { clientId, postId } = req.params;
+  try {
+    const { data: client } = await supabase.from("clients").select("*").eq("id", clientId).single();
+    if (!client?.wordpress_url || !client?.wordpress_username || !client?.wordpress_password) {
+      return res.status(400).json({ error: "WordPress credentials not set" });
+    }
+    const wpBase = client.wordpress_url.replace(/\/$/, "");
+    const authHeaders = {
+      "Authorization": "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64"),
+      "Content-Type": "application/json",
+    };
+
+    // Fetch the post
+    const postRes = await axios.get(`${wpBase}/wp-json/wp/v2/posts/${postId}?context=edit`, {
+      headers: authHeaders, httpsAgent
+    });
+    const post = postRes.data;
+    const html = post?.content?.raw || "";
+    const title = post?.yoast_head_json?.title || post?.title?.rendered || "";
+    const metadesc = post?.yoast_head_json?.description || "";
+
+    // Fetch keyword from scheduled_jobs
+    const { data: job } = await supabase
+      .from("scheduled_jobs")
+      .select("keyword")
+      .eq("client_id", clientId)
+      .eq("wp_post_id", parseInt(postId))
+      .single();
+    const keyword = job?.keyword || "";
+
+    if (!keyword) return res.json({ green: false, issues: ["No keyword found for post"] });
+
+    // Run the same checkIssues logic
+    const kwLower = keyword.toLowerCase();
+    const kwWords = kwLower.split(/\s+/);
+    const textOnly = html.replace(/<[^>]+>/g, " ").toLowerCase();
+    const wordCount = textOnly.split(/\s+/).filter(Boolean).length;
+
+    const issues = [];
+
+    // Keyphrase density
+    let kwCount = 0, pos = 0;
+    while ((pos = textOnly.indexOf(kwLower, pos)) !== -1) { kwCount++; pos += kwLower.length; }
+    const minOccurrences = Math.max(5, Math.floor(wordCount / 300));
+    if (kwCount < minOccurrences) issues.push(`Low density (${kwCount}/${minOccurrences})`);
+
+    // Keyphrase in title
+    const titleLower = title.replace(/ - %%sitename%%/, "").toLowerCase();
+    const missingInTitle = kwWords.filter(w => !titleLower.includes(w));
+    if (missingInTitle.length > 0) issues.push(`Missing in title: ${missingInTitle.join(", ")}`);
+
+    // Keyphrase in subheadings
+    const headings = [...html.matchAll(/<h[23][^>]*>(.*?)<\/h[23]>/gi)].map(m => m[1].replace(/<[^>]+>/g, "").toLowerCase());
+    const hasKwInHeading = headings.some(h => kwWords.some(w => h.includes(w)));
+    if (!hasKwInHeading) issues.push("Missing in subheadings");
+
+    // Meta description length
+    if (metadesc.length < 120 || metadesc.length > 156) issues.push(`Meta desc length ${metadesc.length} (need 120-156)`);
+
+    res.json({ green: issues.length === 0, issues, keyword, wordCount });
+  } catch (err) {
+    console.error("[YoastCheck] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get("/api/keywords/gap", async (req, res) => {
   const { domain, competitor1, competitor2, database = "us" } = req.query;
@@ -1296,6 +1362,17 @@ app.post("/api/keywords/monthly-refresh/:clientId", async (req, res) => {
     console.error("Regenerate queue error:", err.message);
     res.status(500).json({ error: "Failed to regenerate queue", detail: err.message });
   }
+});
+
+// ─── ARCHIVED POSTS (published posts for a client) ──────────────────────────
+app.get("/api/clients/:clientId/archived-posts", requireAuth, async (req, res) => {
+  const { clientId } = req.params;
+  const { data, error } = await supabase.from("posts")
+    .select("id, keyword, title, wp_url, published_at, status")
+    .eq("client_id", clientId).eq("status", "published")
+    .order("published_at", { ascending: false }).limit(50);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ posts: data || [] });
 });
 
 // ─── REFRESH RESEARCH ONLY (library + AI, no gap) ────────────────────────────
