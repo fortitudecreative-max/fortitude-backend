@@ -524,7 +524,7 @@ ${existingContentPrompt}
 Return your response as JSON with exactly this structure:
 {
   "title": "SEO optimized blog post title — STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
-  "metaDescription": "Meta description — HARD limit: EXACTLY 140-156 characters total (count every character including spaces). Count twice before finalizing. Do NOT exceed 156 — trim the end if needed. Include the target keyword naturally.",
+  "metaDescription": "Meta description — HARD limit: MAXIMUM 60 characters total (count every character including spaces). Count twice before finalizing. Do NOT exceed 60 — trim the end if needed. Keep it punchy and include the target keyword.",
   "slug": "url-friendly-slug",
   "content": "Full HTML only — NO markdown whatsoever. Use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <a> tags exclusively. Never use **, --, ##, or any markdown syntax. All bullet points must be <ul><li> HTML. All bold must be <strong>. Minimum 800 words.",
   "wordCount": estimated word count as integer,
@@ -559,9 +559,9 @@ Return only the JSON, no other text.`;
 
     // Safety net: convert any markdown that slipped through
     post.content = markdownToHtml(post.content);
-    // Safety net: enforce 156-char meta desc hard limit
-    if (post.metaDescription && post.metaDescription.length > 156) {
-      post.metaDescription = post.metaDescription.slice(0, 153).trimEnd() + "...";
+    // Safety net: enforce 60-char meta desc hard limit
+    if (post.metaDescription && post.metaDescription.length > 60) {
+      post.metaDescription = post.metaDescription.slice(0, 57).trimEnd() + "...";
     }
 
     // Build all schema blocks (Article + HowTo if applicable + FAQPage) + visible HTML sections
@@ -1733,9 +1733,9 @@ function buildSchemaBlock(opts) {
     schemas.push(faqSchema);
 
     // Build plain HTML FAQ accordion — no plugin dependency, always renders correctly
-    const faqItems = faqs.map(f => `<div class="faq-item" style="margin-bottom:20px;border-bottom:1px solid #eee;padding-bottom:16px;">
+    const faqItems = faqs.map(f => `<div class="faq-item" style="margin-bottom:20px;border-bottom:1px solid currentColor;border-bottom-color:rgba(128,128,128,0.2);padding-bottom:16px;">
 <h3 style="margin:0 0 8px;font-size:1.1em;">${f.question.replace(/</g,"&lt;").replace(/>/g,"&gt;")}</h3>
-<p style="margin:0;color:#444;">${f.answer.replace(/</g,"&lt;").replace(/>/g,"&gt;")}</p>
+<p style="margin:0;">${f.answer.replace(/</g,"&lt;").replace(/>/g,"&gt;")}</p>
 </div>`).join("\n");
 
     faqHtml = `\n<div class="faq-section">\n<h2>Frequently Asked Questions</h2>\n${faqItems}\n</div>`;
@@ -1961,7 +1961,7 @@ const MAX_REPAIR_CYCLES = 3;
 //   - Keyphrase density (too low)        → AI content rewrite
 //   - Keyphrase not in SEO title         → AI title rewrite via Fortitude plugin
 //   - Keyphrase missing from H2/H3s      → AI content rewrite
-//   - Meta description over 156 chars   → AI meta rewrite via Fortitude plugin
+//   - Meta description over 60 chars    → AI meta rewrite via Fortitude plugin
 // ─────────────────────────────────────────────────────────────────────────────
 const YOAST_MAX_PASSES = 5;
 
@@ -1999,7 +1999,7 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
     if (!hasKwInHeading) issues.push({ type: "subheadings", headings: headings.slice(0, 6) });
 
     // Meta description length
-    if (meta.length > 156) issues.push({ type: "meta_length", length: meta.length });
+    if (meta.length > 60) issues.push({ type: "meta_length", length: meta.length });
 
     return issues;
   };
@@ -2060,15 +2060,15 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
       attemptedThisPass.push("meta_length");
       const priorMetaFails = passHistory.filter(h => h.attempted.includes("meta_length")).length;
       const metaPrompt = priorMetaFails > 0
-        ? `PREVIOUS ${priorMetaFails} ATTEMPT(S) FAILED — result was still over 156 chars. Write something significantly shorter, aim for 125-140 characters. Cut aggressively while keeping "${keyword}". Return ONLY the text, no quotes.\n\nCurrent (${metaIssue.length} chars): "${currentMeta}"`
-        : `Rewrite to be UNDER 156 characters while keeping the keyphrase "${keyword}" and the same meaning. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"`;
+        ? `PREVIOUS ${priorMetaFails} ATTEMPT(S) FAILED — result was still over 60 chars. Write something significantly shorter, aim for 50-58 characters. Cut aggressively while keeping "${keyword}". Return ONLY the text, no quotes.\n\nCurrent (${metaIssue.length} chars): "${currentMeta}"`
+        : `Rewrite to be UNDER 60 characters while keeping the keyphrase "${keyword}" and the same meaning. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"`;
       try {
         const msg = await anthropic.messages.create({
           model: "claude-sonnet-4-20250514", max_tokens: 300,
           messages: [{ role: "user", content: metaPrompt }]
         });
         const newMeta = msg.content[0].text.trim().replace(/^["']|["']$/g, "");
-        if (newMeta.length >= 80 && newMeta.length <= 156) {
+        if (newMeta.length >= 20 && newMeta.length <= 60) {
           currentMeta = newMeta; metaChanged = true;
           fixes.push({ pass, type: "meta_length", fix: `Trimmed to ${newMeta.length} chars` });
           log(`Fixed meta: ${newMeta.length} chars`);
@@ -2369,7 +2369,7 @@ This protects the business's service revenue while keeping content SEO-valuable.
 
 Return ONLY valid JSON with these exact fields:
 - title: SEO title — STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
-- metaDescription: meta description — HARD limit: EXACTLY 140-156 characters total including spaces. Count every character. Do NOT exceed 156 — trim the end if needed.
+- metaDescription: meta description — HARD limit: MAXIMUM 60 characters total including spaces. Count every character. Do NOT exceed 60 — keep it short and punchy.
 - slug: URL slug (lowercase, hyphens)
 - content: pure HTML body using <h2>, <h3>, <p>, <ul>, <li>, <strong>, <a> tags ONLY. NO markdown whatsoever.
 - wordCount: integer word count
@@ -2440,8 +2440,8 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
     }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
 
     // ── Yoast meta: full-caps detection + 3-path write (same as manual publish) ────
-    const schSafeMetaDesc = (post.metaDescription || "").length > 156
-      ? (post.metaDescription || "").slice(0, 153).trimEnd() + "..."
+    const schSafeMetaDesc = (post.metaDescription || "").length > 60
+      ? (post.metaDescription || "").slice(0, 57).trimEnd() + "..."
       : (post.metaDescription || "");
     const schLongtailKw = makeLongtailKeyphrase(keyword);
     let schSeoCaps = { yoast: "none", fortitudePlugin: false, canWriteSeoMeta: false, restMetaKeys: false, indexablesApi: false };
