@@ -1124,12 +1124,17 @@ app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
           { post_id: parseInt(postId) },
           { headers: authHeaders, httpsAgent, timeout: 15000 });
         const scores = r.data?.scores_after || {};
-        const seo = parseInt(scores.primary_focus_keyword_score || 0);
-        const read = parseInt(scores.readability_score || 0);
-        // Yoast: >= 50 = orange, >= 75 = green. We treat >= 50 as passing.
-        const green = seo >= 50 && read >= 50;
-        console.log(`[YoastCheck] Post ${postId}: seo=${seo} read=${read} green=${green}`);
-        return res.json({ green, seo_score: seo, readability_score: read, source: "fortitude_plugin" });
+        const seo = parseInt(scores.primary_focus_keyword_score ?? 0);
+        const read = parseInt(scores.readability_score ?? 0);
+        const hasFocusKw = scores.has_focus_keyword === true || scores.has_focus_keyword === "1";
+        // -1 means score not available (no focus kw set or not computed yet)
+        // Yoast: >= 75 = green, >= 50 = orange. We treat >= 50 as passing.
+        // If no focus keyword, SEO score is meaningless - only require readability
+        const seoOk = !hasFocusKw || seo >= 50;
+        const readOk = read >= 50;
+        const green = seoOk && readOk;
+        console.log(`[YoastCheck] Post ${postId}: seo=${seo} read=${read} hasFocusKw=${hasFocusKw} green=${green}`);
+        return res.json({ green, seo_score: seo, readability_score: read, has_focus_keyword: hasFocusKw, source: "fortitude_plugin" });
       } catch(e) {
         console.log("[YoastCheck] Plugin check failed:", e.message);
       }
