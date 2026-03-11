@@ -524,7 +524,7 @@ ${existingContentPrompt}
 Return your response as JSON with exactly this structure:
 {
   "title": "SEO optimized blog post title — STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
-  "metaDescription": "Meta description — STRICT MAXIMUM 60 characters total including spaces. Count character by character before submitting — if it is over 60 characters, shorten it before returning. Keep it punchy and include the target keyword.",
+  "metaDescription": "Meta description — STRICT range: 120-156 characters total including spaces. Count character by character before submitting. Must be at least 120 and no more than 156 characters. Include the target keyword naturally.",
   "slug": "url-friendly-slug",
   "content": "Full HTML only — NO markdown whatsoever. Use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <a> tags exclusively. Never use **, --, ##, or any markdown syntax. All bullet points must be <ul><li> HTML. All bold must be <strong>. Minimum 800 words.",
   "wordCount": estimated word count as integer,
@@ -561,36 +561,36 @@ Return only the JSON, no other text.`;
     post.content = markdownToHtml(post.content);
 
     // Meta description retry loop — never truncate, always regenerate if over 60
-    if (post.metaDescription && post.metaDescription.length > 60) {
+    if (post.metaDescription && (post.metaDescription.length < 120 || post.metaDescription.length > 156)) {
       let metaAttempts = 0;
-      while (post.metaDescription.length > 60 && metaAttempts < 3) {
+      while ((post.metaDescription.length < 120 || post.metaDescription.length > 156) && metaAttempts < 3) {
         metaAttempts++;
-        console.log(`[Meta] Over 60 chars (${post.metaDescription.length}) — retry ${metaAttempts}: "${post.metaDescription}"`);
+        console.log(`[Meta] Out of 120-156 range (${post.metaDescription.length}) — retry ${metaAttempts}: "${post.metaDescription}"`);
         try {
           const metaRetry = await client.messages.create({
             model: "claude-sonnet-4-20250514",
             max_tokens: 100,
-            messages: [{ role: "user", content: `Rewrite this meta description so it is UNDER 60 characters total (including spaces). It must still include the keyword "${keyword}" and convey the same meaning. Count every character carefully — do not exceed 60. Return ONLY the new meta description text, no quotes, no explanation.
+            messages: [{ role: "user", content: `Rewrite this meta description to be between 120-156 characters total including spaces. It must include the keyword "${keyword}" and convey the same meaning. Count every character carefully — must be at least 120 and no more than 156. Return ONLY the new meta description text, no quotes, no explanation.
 
 Current (${post.metaDescription.length} chars): ${post.metaDescription}` }],
           });
           const newMeta = metaRetry.content[0]?.text?.trim().replace(/^["']|["']$/g, "") || "";
-          if (newMeta.length > 0 && newMeta.length <= 60) {
+          if (newMeta.length >= 120 && newMeta.length <= 156) {
             post.metaDescription = newMeta;
             console.log(`[Meta] Retry ${metaAttempts} succeeded: "${newMeta}" (${newMeta.length} chars)`);
           } else {
-            console.log(`[Meta] Retry ${metaAttempts} still over 60 (${newMeta.length}): "${newMeta}"`);
+            console.log(`[Meta] Retry ${metaAttempts} out of range (${newMeta.length}): "${newMeta}"`);
           }
         } catch(e) {
           console.log("[Meta] Retry error:", e.message);
           break;
         }
       }
-      // Last resort: if still over 60 after 3 retries, trim at last space before 60
-      if (post.metaDescription.length > 60) {
-        const trimmed = post.metaDescription.slice(0, 60);
+      // Last resort: if still over 156 after 3 retries, trim at word boundary
+      if (post.metaDescription.length > 156) {
+        const trimmed = post.metaDescription.slice(0, 156);
         const lastSpace = trimmed.lastIndexOf(" ");
-        post.metaDescription = lastSpace > 30 ? trimmed.slice(0, lastSpace) : trimmed;
+        post.metaDescription = lastSpace > 100 ? trimmed.slice(0, lastSpace) : trimmed;
         console.log(`[Meta] Hard-trimmed at word boundary: "${post.metaDescription}"`);
       }
     }
@@ -830,52 +830,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
         meta: { "astra-migrate-meta-layouts": "set" }
       }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }).catch(() => {});
 
-      // ── Trigger Yoast score recalculation (green lights in post list) ──────────
-      // Strategy: try Fortitude yoast-recalc first, then Yoast Premium indexables,
-      // then a no-op post update (fires wp_update_post hooks which triggers Yoast).
-      // The no-op update is the universal fallback that works on ALL Yoast versions.
-      let recalcOk = false;
-
-      // 1. Fortitude plugin recalc (calls WPSEO_Meta_Columns::calculate_scores directly)
-      if (seoCaps.fortitudePlugin && !recalcOk) {
-        try {
-          const r = await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
-            { post_id: wpPost.id },
-            { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-          if (r.data?.success || r.status === 200) {
-            recalcOk = true;
-            console.log("[SEO] ✓ Yoast scores recalculated via Fortitude yoast-recalc");
-          }
-        } catch(e) {}
-      }
-
-      // 2. Yoast Premium indexables rebuild (rebuilds the indexable record including score)
-      if (seoCaps.indexablesApi && !recalcOk) {
-        try {
-          await axios.post(`${wordpressUrl}/wp-json/yoast/v3/indexing/posts`,
-            { post_id: wpPost.id },
-            { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-          recalcOk = true;
-          console.log("[SEO] ✓ Yoast scores recalculated via Premium indexables API");
-        } catch(e) {}
-      }
-
-      // 3. Universal fallback: no-op post update fires wp_update_post → Yoast recalculates scores
-      // This works on Free AND Premium and is the most reliable method.
-      if (!recalcOk) {
-        try {
-          await new Promise(r => setTimeout(r, 1500)); // brief pause so meta write has committed
-          await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`,
-            { status: "publish" },
-            { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-          recalcOk = true;
-          console.log("[SEO] ✓ Yoast scores triggered via no-op post update");
-        } catch(e) {
-          console.log("[SEO] no-op update failed:", e.message);
-        }
-      }
-
-      console.log(`[SEO] Write summary — method=${yoastWriteMethod}, recalcOk=${recalcOk}, focuskw="${seoFocuskw}"`);
+      console.log(`[SEO] Write summary — method=${yoastWriteMethod}, focuskw="${seoFocuskw}" — recalc will run after optimize loop`);
 
     } catch (yoastErr) {
       console.log("[SEO] Yoast write error:", JSON.stringify(yoastErr.response?.data || yoastErr.message));
@@ -921,6 +876,52 @@ app.post("/api/publish/wordpress", async (req, res) => {
       } catch(e) {
         console.error("[QA] Repair loop threw:", e.message);
         qa = { passed: false, score: 0, issues: [{ type: "qa_error", severity: "error", message: e.message }], warnings: [], liveUrl: wpPost.link };
+      }
+    }
+
+    // ── Final Yoast recalc — AFTER optimize loop + QA so green lights reflect final state ──
+    // Must run last because the optimize loop may have rewritten meta/keyphrase after initial publish.
+    // The no-op PUT fires wp_update_post which forces Yoast to recompute ALL scores and indexables.
+    if (wpPost?.id && wordpressUrl) {
+      try {
+        // Step 1: Small pause to let any prior writes fully commit to the DB
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Step 2: Fortitude plugin recalc (most direct — calls calculate_scores server-side)
+        let recalcOk = false;
+        if (seoCaps?.fortitudePlugin) {
+          try {
+            const r = await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
+              { post_id: wpPost.id },
+              { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
+            if (r.data?.success || r.status === 200) {
+              recalcOk = true;
+              console.log("[Recalc] ✓ Fortitude yoast-recalc succeeded");
+            }
+          } catch(e) { console.log("[Recalc] Fortitude recalc error:", e.message); }
+        }
+
+        // Step 3: Always run no-op PUT regardless — this is the universal trigger for Yoast
+        // Even if Fortitude recalc ran, the no-op PUT ensures WP hooks fire and the post_modified
+        // timestamp updates, which forces the post list to refresh its cached Yoast column values.
+        await axios.put(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`,
+          { status: "publish" },
+          { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
+        console.log("[Recalc] ✓ No-op PUT fired — Yoast will recompute scores on next post list load");
+
+        // Step 4: Second Fortitude recalc after the PUT so scores are in DB before response
+        if (seoCaps?.fortitudePlugin) {
+          try {
+            await new Promise(r => setTimeout(r, 800));
+            await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
+              { post_id: wpPost.id },
+              { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
+            console.log("[Recalc] ✓ Second Fortitude recalc after PUT completed");
+          } catch(e) {}
+        }
+
+      } catch(e) {
+        console.log("[Recalc] Final recalc error:", e.message);
       }
     }
 
@@ -1992,7 +1993,7 @@ const MAX_REPAIR_CYCLES = 3;
 //   - Keyphrase density (too low)        → AI content rewrite
 //   - Keyphrase not in SEO title         → AI title rewrite via Fortitude plugin
 //   - Keyphrase missing from H2/H3s      → AI content rewrite
-//   - Meta description over 60 chars    → AI meta rewrite via Fortitude plugin
+//   - Meta description out of 120-156 char range → AI meta rewrite via Fortitude plugin
 // ─────────────────────────────────────────────────────────────────────────────
 const YOAST_MAX_PASSES = 5;
 
@@ -2030,7 +2031,7 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
     if (!hasKwInHeading) issues.push({ type: "subheadings", headings: headings.slice(0, 6) });
 
     // Meta description length
-    if (meta.length > 60) issues.push({ type: "meta_length", length: meta.length });
+    if (meta.length < 120 || meta.length > 156) issues.push({ type: "meta_length", length: meta.length });
 
     return issues;
   };
@@ -2091,15 +2092,15 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
       attemptedThisPass.push("meta_length");
       const priorMetaFails = passHistory.filter(h => h.attempted.includes("meta_length")).length;
       const metaPrompt = priorMetaFails > 0
-        ? `PREVIOUS ${priorMetaFails} ATTEMPT(S) FAILED — result was still over 60 chars. Write something significantly shorter, aim for 50-58 characters. Cut aggressively while keeping "${keyword}". Return ONLY the text, no quotes.\n\nCurrent (${metaIssue.length} chars): "${currentMeta}"`
-        : `Rewrite to be UNDER 60 characters while keeping the keyphrase "${keyword}" and the same meaning. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"`;
+        ? `PREVIOUS ${priorMetaFails} ATTEMPT(S) FAILED — result was out of 120-156 char range. Rewrite to be between 120-156 characters total including spaces while keeping "${keyword}". Count carefully. Return ONLY the text, no quotes.\n\nCurrent (${metaIssue.length} chars): "${currentMeta}"`
+        : `Rewrite to be between 120-156 characters total including spaces while keeping the keyphrase "${keyword}". Count carefully. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"`;
       try {
         const msg = await anthropic.messages.create({
           model: "claude-sonnet-4-20250514", max_tokens: 300,
           messages: [{ role: "user", content: metaPrompt }]
         });
         const newMeta = msg.content[0].text.trim().replace(/^["']|["']$/g, "");
-        if (newMeta.length > 0 && newMeta.length <= 60) {
+        if (newMeta.length >= 120 && newMeta.length <= 156) {
           currentMeta = newMeta; metaChanged = true;
           fixes.push({ pass, type: "meta_length", fix: `Trimmed to ${newMeta.length} chars` });
           log(`Fixed meta: ${newMeta.length} chars`);
@@ -2400,7 +2401,7 @@ This protects the business's service revenue while keeping content SEO-valuable.
 
 Return ONLY valid JSON with these exact fields:
 - title: SEO title — STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
-- metaDescription: meta description — STRICT MAXIMUM 60 characters total including spaces. Count character by character. If it exceeds 60, shorten it before returning. Keep it punchy.
+- metaDescription: meta description — STRICT range: 120-156 characters total including spaces. Count character by character. Must be at least 120 and no more than 156.
 - slug: URL slug (lowercase, hyphens)
 - content: pure HTML body using <h2>, <h3>, <p>, <ul>, <li>, <strong>, <a> tags ONLY. NO markdown whatsoever.
 - wordCount: integer word count
@@ -2471,8 +2472,8 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
     }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
 
     // ── Yoast meta: full-caps detection + 3-path write (same as manual publish) ────
-    const schSafeMetaDesc = (post.metaDescription || "").length > 60
-      ? (post.metaDescription || "").slice(0, 60)
+    const schSafeMetaDesc = (post.metaDescription || "").length > 156
+      ? (post.metaDescription || "").slice(0, 153).trimEnd() + "..."
       : (post.metaDescription || "");
     const schLongtailKw = makeLongtailKeyphrase(keyword);
     let schSeoCaps = { yoast: "none", fortitudePlugin: false, canWriteSeoMeta: false, restMetaKeys: false, indexablesApi: false };
@@ -3803,7 +3804,7 @@ app.post("/api/seo/fix", async (req, res) => {
           const text = ph.replace(/<[^>]+>/g," ").trim().slice(0, 1500);
           const cur = ph.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim() || "";
           val = await ai(`Write an SEO title tag. 50-60 chars, include primary keyword. ${cur ? `Current: "${cur}". ` : ""}Content: "${text.slice(0,800)}". Return ONLY the title.`, 200);
-          if (val.length > 60) { const t = val.slice(0, 60); const ls = t.lastIndexOf(" "); val = ls > 30 ? t.slice(0, ls) : t; }
+          if (val.length > 156) { const t = val.slice(0, 156); const ls = t.lastIndexOf(" "); val = ls > 100 ? t.slice(0, ls) : t; }
         }
         ctx.val = val;
         return [
