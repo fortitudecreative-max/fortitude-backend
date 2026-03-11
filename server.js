@@ -1127,13 +1127,24 @@ app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
         const seo = parseInt(scores.primary_focus_keyword_score ?? 0);
         const read = parseInt(scores.readability_score ?? 0);
         const hasFocusKw = scores.has_focus_keyword === true || scores.has_focus_keyword === "1";
-        // -1 means score not available (no focus kw set or not computed yet)
+        const hasTitle = scores.has_title === true || scores.has_title === "1";
+        const hasMetaDesc = scores.has_metadesc === true || scores.has_metadesc === "1";
+
         // Yoast: >= 75 = green, >= 50 = orange. We treat >= 50 as passing.
-        // If no focus keyword, SEO score is meaningless - only require readability
+        // If no focus keyword, SEO score is meaningless - only require readability.
         const seoOk = !hasFocusKw || seo >= 50;
         const readOk = read >= 50;
-        const green = seoOk && readOk;
-        console.log(`[YoastCheck] Post ${postId}: seo=${seo} read=${read} hasFocusKw=${hasFocusKw} green=${green}`);
+        let green = seoOk && readOk;
+
+        // Elementor / page-builder sites: Yoast can't analyze content stored in _elementor_data,
+        // so scores stay 0 even when everything is correctly set. In this case if the post has
+        // focus keyword + title + meta description all set, treat it as passing.
+        if (!green && seo === 0 && read === 0 && hasFocusKw && hasTitle && hasMetaDesc) {
+          green = true;
+          console.log(`[YoastCheck] Post ${postId}: scores=0 but meta fully set (likely Elementor) - treating as green`);
+        }
+
+        console.log(`[YoastCheck] Post ${postId}: seo=${seo} read=${read} hasFocusKw=${hasFocusKw} hasTitle=${hasTitle} hasMetaDesc=${hasMetaDesc} green=${green}`);
         return res.json({ green, seo_score: seo, readability_score: read, has_focus_keyword: hasFocusKw, source: "fortitude_plugin" });
       } catch(e) {
         console.log("[YoastCheck] Plugin check failed:", e.message);
