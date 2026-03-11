@@ -1015,6 +1015,7 @@ app.post("/api/yoast-optimize", async (req, res) => {
     console.error("[YoastOpt/Manual] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
+});
 
 // ── Yoast green-light check for a published post ─────────────────────────────
 app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
