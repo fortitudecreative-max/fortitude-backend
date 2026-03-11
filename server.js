@@ -719,6 +719,19 @@ app.post("/api/publish/wordpress", async (req, res) => {
     const wpPost = wpRes.data;
     console.log("✓ Post created, ID:", wpPost.id);
 
+    // Clear Elementor edit mode - on sites with Elementor, save_post hooks may set
+    // _elementor_edit_mode:builder on new posts. Our posts are plain HTML, not Elementor
+    // layouts, so this flag must be cleared for Yoast to score content correctly.
+    try {
+      await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`,
+        { meta: { _elementor_edit_mode: "" } },
+        { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent, timeout: 8000 }
+      );
+      console.log("[Elementor] Cleared _elementor_edit_mode on post", wpPost.id);
+    } catch(ee) {
+      console.log("[Elementor] Could not clear elementor mode (non-fatal):", ee.message);
+    }
+
     // Save schema to Fortitude plugin endpoint (outputs in wp_head, not post body)
     if (schemaHtml) {
       (async () => {
@@ -1880,8 +1893,8 @@ async function markImageUsed(imageId) {
 // This runs as a safety net on all post content before it goes to WordPress.
 function markdownToHtml(md) {
   if (!md || typeof md !== "string") return md;
-  // If it already looks like HTML (has real block tags), skip conversion
-  if (/<(h[1-6]|ul|ol|li|blockquote|table)/i.test(md)) {
+  // If it already looks like HTML (has real block tags including <p>), skip conversion
+  if (/<(p|h[1-6]|ul|ol|li|blockquote|table)/i.test(md)) {
     // Still clean up any stray markdown inside HTML
     md = md.replace(/^#{1,6}\s+(.+)$/gm, (_, t) => t); // strip # inside HTML
     return md;
