@@ -4319,3 +4319,4 @@ app.listen(PORT, () => {
   console.log("✓ Anthropic: " + (ANTHROPIC_API_KEY ? "loaded" : "MISSING"));
   console.log("✓ Supabase: " + (SUPABASE_URL ? "loaded" : "MISSING"));
 });
+// redeploy Thu Mar 12 16:55:18 UTC 2026
