@@ -227,7 +227,7 @@ app.get("/api/images", async (req, res) => {
   if (industry) query = query.eq("industry", industry);
   if (category) query = query.eq("category", category);
   if (client_id) query = query.eq("client_id", client_id);
-  else query = query.is("client_id", null);
+  // No client_id filter - image library shows all images regardless of client assignment
   const { data, error } = await query;
   if (error) return res.status(500).json({ error: error.message });
   res.json({ images: data });
