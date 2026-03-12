@@ -898,49 +898,33 @@ app.post("/api/publish/wordpress", async (req, res) => {
       }
     }
 
-    // ── Final Yoast recalc — AFTER optimize loop + QA so green lights reflect final state ──
-    // Must run last because the optimize loop may have rewritten meta/keyphrase after initial publish.
-    // The no-op PUT fires wp_update_post which forces Yoast to recompute ALL scores and indexables.
+    // ── Final Yoast recalc — classic editor Update ────────────────────────────
+    // Simulates clicking the Update button in wp-admin, which fires every save_post
+    // hook including Yoast scoring. Works on all sites (Free/Premium/Elementor).
     if (wpPost?.id && wordpressUrl) {
       try {
-        // Step 1: Small pause to let any prior writes fully commit to the DB
         await new Promise(r => setTimeout(r, 2000));
-
-        // Step 2: Fortitude plugin recalc (most direct — calls calculate_scores server-side)
-        let recalcOk = false;
-        if (seoCaps?.fortitudePlugin) {
-          try {
-            const r = await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
-              { post_id: wpPost.id },
-              { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-            if (r.data?.success || r.status === 200) {
-              recalcOk = true;
-              console.log("[Recalc] ✓ Fortitude yoast-recalc succeeded");
-            }
-          } catch(e) { console.log("[Recalc] Fortitude recalc error:", e.message); }
+        const basicCreds = Buffer.from(`${wpUsername}:${wpPassword}`).toString("base64");
+        const editPageRes = await axios.get(
+          `${wordpressUrl}/wp-admin/post.php?post=${wpPost.id}&action=edit`,
+          { headers: { "Authorization": `Basic ${basicCreds}` }, httpsAgent, timeout: 15000, maxRedirects: 5 }
+        );
+        const nonce = editPageRes.data.match(/name="_wpnonce"[^>]*value="([^"]+)"/)?.[1];
+        if (nonce) {
+          const form = new URLSearchParams({
+            _wpnonce: nonce, action: "editpost", post_ID: String(wpPost.id),
+            post_status: "publish", save: "Update"
+          });
+          await axios.post(`${wordpressUrl}/wp-admin/post.php`, form.toString(), {
+            headers: { "Authorization": `Basic ${basicCreds}`, "Content-Type": "application/x-www-form-urlencoded" },
+            httpsAgent, timeout: 15000, maxRedirects: 5
+          });
+          console.log("[Recalc] ✓ Classic editor Update fired — Yoast dots will be green");
+        } else {
+          console.log("[Recalc] Could not get nonce, skipping classic Update");
         }
-
-        // Step 3: Always run no-op PUT regardless — this is the universal trigger for Yoast
-        // Even if Fortitude recalc ran, the no-op PUT ensures WP hooks fire and the post_modified
-        // timestamp updates, which forces the post list to refresh its cached Yoast column values.
-        await axios.put(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`,
-          { status: "publish" },
-          { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-        console.log("[Recalc] ✓ No-op PUT fired — Yoast will recompute scores on next post list load");
-
-        // Step 4: Second Fortitude recalc after the PUT so scores are in DB before response
-        if (seoCaps?.fortitudePlugin) {
-          try {
-            await new Promise(r => setTimeout(r, 800));
-            await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
-              { post_id: wpPost.id },
-              { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-            console.log("[Recalc] ✓ Second Fortitude recalc after PUT completed");
-          } catch(e) {}
-        }
-
       } catch(e) {
-        console.log("[Recalc] Final recalc error:", e.message);
+        console.log("[Recalc] Classic Update error:", e.message);
       }
     }
 
@@ -1025,49 +1009,32 @@ app.post("/api/yoast-recalc", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "WordPress credentials not set" });
     }
     const wpBase = client.wordpress_url.replace(/\/$/, "");
-    const basicAuth = "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64");
-    const authHeaders = { "Authorization": basicAuth, "Content-Type": "application/json" };
+    const basicCreds = Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64");
+    const basicAuth = "Basic " + basicCreds;
 
-    // Use XML-RPC wp.editPost - fires every save_post hook including Yoast,
-    // works on all WP sites regardless of Elementor/page builder, no browser needed.
-    // First fetch the current post content via REST so we can echo it back.
-    const fetchRes = await axios.get(
-      `${wpBase}/wp-json/wp/v2/posts/${wpPostId}?context=edit`,
-      { headers: authHeaders, httpsAgent, timeout: 10000 }
+    // Classic editor Update - fetch nonce then POST action=editpost.
+    // Identical to clicking Update in wp-admin. Fires every save_post hook
+    // including Yoast scoring. Works on Free/Premium/Elementor sites.
+    const editPageRes = await axios.get(
+      `${wpBase}/wp-admin/post.php?post=${wpPostId}&action=edit`,
+      { headers: { "Authorization": basicAuth }, httpsAgent, timeout: 15000, maxRedirects: 5 }
     );
-    const post = fetchRes.data;
-    const postTitle = post?.title?.raw || "";
-    const postContent = post?.content?.raw || "";
-    const postStatus = post?.status || "publish";
-
-    // Build XML-RPC payload for wp.editPost
-    const xmlPayload = `<?xml version="1.0"?>
-<methodCall>
-  <methodName>wp.editPost</methodName>
-  <params>
-    <param><value><int>1</int></value></param>
-    <param><value><string>${client.wordpress_username}</string></value></param>
-    <param><value><string>${client.wordpress_password}</string></value></param>
-    <param><value><int>${wpPostId}</int></value></param>
-    <param><value><struct>
-      <member><name>post_title</name><value><string>${postTitle.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</string></value></member>
-      <member><name>post_content</name><value><string>${postContent.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</string></value></member>
-      <member><name>post_status</name><value><string>${postStatus}</string></value></member>
-    </struct></value></param>
-  </params>
-</methodCall>`;
-
-    const xmlRpcRes = await axios.post(`${wpBase}/xmlrpc.php`, xmlPayload, {
-      headers: { "Content-Type": "text/xml" },
-      httpsAgent,
-      timeout: 20000,
+    const nonce = editPageRes.data.match(/name="_wpnonce"[^>]*value="([^"]+)"/)?.[1];
+    if (!nonce) {
+      console.log(`[Recalc] No nonce found for post ${wpPostId}`);
+      return res.json({ success: false, method: "classic_update", error: "nonce not found" });
+    }
+    const form = new URLSearchParams({
+      _wpnonce: nonce, action: "editpost", post_ID: String(wpPostId),
+      post_status: "publish", save: "Update"
     });
+    await axios.post(`${wpBase}/wp-admin/post.php`, form.toString(), {
+      headers: { "Authorization": basicAuth, "Content-Type": "application/x-www-form-urlencoded" },
+      httpsAgent, timeout: 15000, maxRedirects: 5
+    });
+    console.log(`[Recalc] Classic editor Update fired for post ${wpPostId}`);
+    res.json({ success: true, method: "classic_update" });
 
-    const success = xmlRpcRes.data?.includes("<boolean>1</boolean>");
-    console.log(`[Recalc] XML-RPC wp.editPost for post ${wpPostId}: ${success ? "OK" : "returned non-true"}`);
-    if (!success) console.log(`[Recalc] XML-RPC response: ${String(xmlRpcRes.data).substring(0, 300)}`);
-
-    res.json({ success: true, method: "xmlrpc_editpost" });
   } catch (err) {
     console.error("[Recalc] Error:", err.message);
     res.status(500).json({ error: err.message });
