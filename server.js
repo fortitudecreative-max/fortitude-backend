@@ -266,6 +266,82 @@ app.post("/api/images/upload", upload.single("image"), async (req, res) => {
 });
 
 // ─── CLIENT LOGO UPLOAD ──────────────────────────────────────────
+// ── detectSeoCapabilities ────────────────────────────────────────────────────
+// Probes a WordPress site and returns what SEO write paths are available.
+// Called on every publish and by the /detect-seo-caps admin endpoint.
+// Results are cached in Supabase so re-probing is fast on subsequent publishes.
+const detectSeoCapabilities = async (wpBaseUrl, authHeaders, clientId = null) => {
+  const result = {
+    yoast: "none",
+    fortitudePlugin: false,
+    canWriteSeoMeta: false,
+    restMetaKeys: false,
+    indexablesApi: false,
+  };
+
+  // 1. Namespace probe — single fast call reveals Fortitude plugin + Yoast edition
+  let namespaces = [];
+  try {
+    const nsResp = await axios.get(`${wpBaseUrl}/wp-json/`, { headers: authHeaders, httpsAgent, timeout: 8000 });
+    namespaces = nsResp.data?.namespaces || [];
+    if (namespaces.includes("fortitude/v1")) {
+      result.fortitudePlugin = true;
+      console.log("[SEO] Fortitude plugin active (fortitude/v1 namespace)");
+    }
+    if (namespaces.includes("yoast/v1")) {
+      result.yoast = namespaces.includes("yoast/v3") ? "premium" : "free";
+      console.log(`[SEO] Yoast detected: ${result.yoast}`);
+    }
+  } catch(e) {
+    console.log("[SEO] Namespace check failed:", e.message);
+  }
+
+  // 2. Check if Yoast registered its meta keys in the REST API
+  if (result.yoast !== "none") {
+    try {
+      const r = await axios.get(`${wpBaseUrl}/wp-json/wp/v2/posts?per_page=1&context=edit`,
+        { headers: authHeaders, httpsAgent, timeout: 6000 });
+      const meta = r.data?.[0]?.meta || {};
+      const yoastKeys = Object.keys(meta).filter(k => k.startsWith("_yoast_wpseo_"));
+      result.restMetaKeys = yoastKeys.length > 0;
+      console.log(`[SEO] REST meta keys: ${result.restMetaKeys ? yoastKeys.slice(0,3).join(", ") + "..." : "NONE"}`);
+    } catch(e) {}
+  }
+
+  // 3. If Fortitude plugin active, get authoritative caps from /caps endpoint
+  if (result.fortitudePlugin) {
+    try {
+      const capsResp = await axios.get(`${wpBaseUrl}/wp-json/fortitude/v1/caps`,
+        { headers: authHeaders, httpsAgent, timeout: 6000 });
+      const caps = capsResp.data;
+      if (caps.yoast_edition) result.yoast = caps.yoast_edition;
+      result.indexablesApi = caps.indexables_api === true;
+      console.log(`[SEO] Fortitude /caps: edition=${caps.yoast_edition}, indexables=${caps.indexables_api}`);
+    } catch(e) {
+      console.log("[SEO] /caps probe failed:", e.message);
+    }
+  }
+
+  // 4. canWriteSeoMeta: true if we have any reliable path
+  // We set this true even without detected keys — PATH C always attempts REST write as fallback
+  result.canWriteSeoMeta = result.fortitudePlugin || result.restMetaKeys || result.yoast !== "none";
+
+  // 5. Persist to Supabase so we skip re-probing on next publish
+  if (clientId) {
+    try {
+      await supabase.from("clients").update({
+        yoast_edition: result.yoast,
+        yoast_rest_meta_keys: result.restMetaKeys,
+        yoast_indexables_api: result.indexablesApi,
+        fortitude_plugin: result.fortitudePlugin,
+        seo_caps_detected_at: new Date().toISOString(),
+      }).eq("id", clientId);
+    } catch(e) {}
+  }
+
+  return result;
+};
+
 // ── POST /api/clients/:id/detect-seo-caps ────────────────────────────
 // Re-probes the client WP site and saves Yoast capability snapshot to Supabase.
 app.post("/api/clients/:id/detect-seo-caps", requireAuth, async (req, res) => {
@@ -714,8 +790,8 @@ app.post("/api/publish/wordpress", async (req, res) => {
         }
       }
 
-      // PATH C: Last resort — try REST write even if keys weren't detected (they may appear after first post)
-      if (!yoastWriteSuccess && yoastEdition !== "none") {
+      // PATH C: Last resort — always attempt REST write regardless of detection result
+      if (!yoastWriteSuccess) {
         try {
           await axios.post(`${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}`, {
             meta: {
