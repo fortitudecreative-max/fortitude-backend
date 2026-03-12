@@ -1028,59 +1028,46 @@ app.post("/api/yoast-recalc", requireAuth, async (req, res) => {
     const basicAuth = "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64");
     const authHeaders = { "Authorization": basicAuth, "Content-Type": "application/json" };
 
-    // The most reliable way to trigger Yoast scoring is the same thing clicking
-    // "Update" in the WP classic editor does: POST to /wp-admin/post.php with
-    // the full form payload. This fires every save_post hook including Yoast analysis.
-    // Step 1: Get a nonce by loading the edit page
-    console.log(`[Recalc] Fetching edit page for post ${wpPostId} to get nonce...`);
-    const editPageRes = await axios.get(`${wpBase}/wp-admin/post.php?post=${wpPostId}&action=edit`, {
-      headers: { "Authorization": basicAuth },
-      httpsAgent,
-      timeout: 15000,
-      maxRedirects: 5,
-    });
+    // Use XML-RPC wp.editPost - fires every save_post hook including Yoast,
+    // works on all WP sites regardless of Elementor/page builder, no browser needed.
+    // First fetch the current post content via REST so we can echo it back.
+    const fetchRes = await axios.get(
+      `${wpBase}/wp-json/wp/v2/posts/${wpPostId}?context=edit`,
+      { headers: authHeaders, httpsAgent, timeout: 10000 }
+    );
+    const post = fetchRes.data;
+    const postTitle = post?.title?.raw || "";
+    const postContent = post?.content?.raw || "";
+    const postStatus = post?.status || "publish";
 
-    const editHtml = editPageRes.data;
-    const nonceMatch = editHtml.match(/name="_wpnonce"[^>]*value="([^"]+)"/);
-    const nonce = nonceMatch?.[1];
-    if (!nonce) {
-      // Fallback: just do a REST API content re-post which still fires most hooks
-      console.log("[Recalc] Could not get nonce, falling back to REST content re-post");
-      const fetchRes = await axios.get(`${wpBase}/wp-json/wp/v2/posts/${wpPostId}?context=edit`, { headers: authHeaders, httpsAgent, timeout: 10000 });
-      const postContent = fetchRes.data?.content?.raw || "";
-      await axios.post(`${wpBase}/wp-json/wp/v2/posts/${wpPostId}`,
-        { status: "publish", content: postContent, date: new Date().toISOString() },
-        { headers: authHeaders, httpsAgent, timeout: 20000 });
-      return res.json({ success: true, method: "rest_fallback" });
-    }
+    // Build XML-RPC payload for wp.editPost
+    const xmlPayload = `<?xml version="1.0"?>
+<methodCall>
+  <methodName>wp.editPost</methodName>
+  <params>
+    <param><value><int>1</int></value></param>
+    <param><value><string>${client.wordpress_username}</string></value></param>
+    <param><value><string>${client.wordpress_password}</string></value></param>
+    <param><value><int>${wpPostId}</int></value></param>
+    <param><value><struct>
+      <member><name>post_title</name><value><string>${postTitle.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</string></value></member>
+      <member><name>post_content</name><value><string>${postContent.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</string></value></member>
+      <member><name>post_status</name><value><string>${postStatus}</string></value></member>
+    </struct></value></param>
+  </params>
+</methodCall>`;
 
-    // Step 2: Extract cookie from the edit page response for session auth
-    const cookies = editPageRes.headers["set-cookie"] || [];
-    const cookieHeader = cookies.map(c => c.split(";")[0]).join("; ");
-
-    // Step 3: POST to wp-admin/post.php mimicking the Update button click
-    const qs = require("querystring");
-    const formData = qs.stringify({
-      "_wpnonce": nonce,
-      "action": "editpost",
-      "post_ID": wpPostId,
-      "post_status": "publish",
-      "save": "Update",
-    });
-
-    await axios.post(`${wpBase}/wp-admin/post.php`, formData, {
-      headers: {
-        "Authorization": basicAuth,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Cookie": cookieHeader,
-      },
+    const xmlRpcRes = await axios.post(`${wpBase}/xmlrpc.php`, xmlPayload, {
+      headers: { "Content-Type": "text/xml" },
       httpsAgent,
       timeout: 20000,
-      maxRedirects: 5,
     });
-    console.log(`[Recalc] Classic editor Update fired for post ${wpPostId}`);
 
-    res.json({ success: true, method: "classic_editor_update" });
+    const success = xmlRpcRes.data?.includes("<boolean>1</boolean>");
+    console.log(`[Recalc] XML-RPC wp.editPost for post ${wpPostId}: ${success ? "OK" : "returned non-true"}`);
+    if (!success) console.log(`[Recalc] XML-RPC response: ${String(xmlRpcRes.data).substring(0, 300)}`);
+
+    res.json({ success: true, method: "xmlrpc_editpost" });
   } catch (err) {
     console.error("[Recalc] Error:", err.message);
     res.status(500).json({ error: err.message });
