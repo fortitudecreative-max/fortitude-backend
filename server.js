@@ -328,18 +328,21 @@ app.post("/api/keywords/library", async (req, res) => {
   res.json({ keyword: data[0] });
 });
 
-app.patch("/api/keywords/library/:id", async (req, res) => {
+const updateLibraryKeyword = async (req, res) => {
   const { id } = req.params;
-  const { keyword, volume, kd, intent } = req.body;
+  const { keyword, volume, kd, intent, industry } = req.body;
   const updates = {};
   if (keyword !== undefined) updates.keyword = keyword;
   if (volume !== undefined) updates.volume = parseInt(volume) || 0;
   if (kd !== undefined) updates.kd = parseInt(kd) || 0;
   if (intent !== undefined) updates.intent = intent;
+  if (industry !== undefined) updates.industry = industry;
   const { data, error } = await supabase.from("keyword_library").update(updates).eq("id", id).select();
   if (error) return res.status(500).json({ error: error.message });
   res.json({ keyword: data[0] });
-});
+};
+app.patch("/api/keywords/library/:id", updateLibraryKeyword);
+app.put("/api/keywords/library/:id", updateLibraryKeyword);
 
 app.post("/api/keywords/library/bulk", async (req, res) => {
   const { keywords } = req.body; // [{ keyword, industry, volume, intent }]
