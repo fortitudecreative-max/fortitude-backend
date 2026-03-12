@@ -1088,14 +1088,27 @@ app.post("/api/competitors/find", async (req, res) => {
 
   // Directories, aggregators, manufacturers, national chains — never real local competitors
   const EXCLUDE_PATTERNS = [
+    // Directories & lead-gen
     "yelp","angi","angie","homeadvisor","thumbtack","bbb","angieslist","houzz",
-    "porch.com","google","facebook","instagram","youtube","amazon","indeed",
-    "linkedin","bing","yahoo","acehardware","lowes","homedepot","buildzoom",
-    "improvenet","networx","fixr","bark.com","taskrabbit","tripadvisor",
-    "manta.com","yellowpages","whitepages","citysearch","mapquest",
-    "lennox","carrier","trane","goodman","rheem","york","daikin","bryant",
-    "wikipedia","wikihow","reddit","quora","nextdoor","apartments","zillow",
-    "angieslist","homewyse","costimates","forbes","businessinsider","cnn","bbc",
+    "porch.com","buildzoom","improvenet","networx","fixr","bark.com","taskrabbit",
+    "manta.com","yellowpages","whitepages","citysearch","mapquest","tripadvisor",
+    "homewyse","costimates","thumbtack","craftjack","modernize","homeguide",
+    // Social / search
+    "google","facebook","instagram","youtube","linkedin","bing","yahoo","nextdoor",
+    "twitter","tiktok","pinterest","reddit","quora",
+    // Media / DIY / editorial
+    "wikipedia","wikihow","forbes","businessinsider","cnn","bbc","thisoldhouse",
+    "todayshomeowner","todayshomeowner","bobvila","hometips","familyhandyman",
+    "thespruce","bobvila","apartmenttherapy","houselogic","realtor","zillow","apartments",
+    // Manufacturers / suppliers
+    "lennox","carrier","trane","goodman","rheem","york","daikin","bryant","american-standard",
+    "kohler","moen","delta","grohe","bosch","acehardware","lowes","homedepot","amazon",
+    // Software / B2B / unrelated
+    "procore","buildertrend","jobber","servicetitan","housecall","indeed","glassdoor",
+    "amazon","indeed","craigslist",
+    // National chains (domain fragments)
+    "rotorooter","servicemaster","servpro","mrhandyman","mrroofing","ars-rescue",
+    "onehourheat","benjaminfranklinplumbing","mrrooter",
   ];
 
   const isDomainExcluded = (d) => {
@@ -1157,15 +1170,25 @@ app.post("/api/competitors/find", async (req, res) => {
       `local ${industry} contractors`,
     ];
 
-    const systemPrompt = `You are a research tool that finds local competitor business websites.
-Your ONLY job is to search Google and return the website domains of LOCAL ${industry} businesses near ${location || clientName}.
+    const systemPrompt = `You are a local competitor research tool.
+Search Google and find the websites of LOCAL ${industry} service companies near ${location || clientName}.
 
-STRICT RULES:
-- Only return domains of ACTUAL LOCAL ${industry} businesses (not directories, not aggregators, not manufacturers)
-- NEVER return: yelp.com, angi.com, homeadvisor.com, thumbtack.com, bbb.org, or ANY review/directory site
-- NEVER return: national brands, manufacturers, or chains
-- ONLY return: small/mid-size local business websites that directly provide ${industry} services
-- Return results as a plain JSON array: ["domain1.com", "domain2.com"]`;
+A valid result is a small or mid-size LOCAL business that:
+- Actually performs ${industry} services directly (installs, repairs, maintains)
+- Serves the ${location || "local"} area specifically
+- Has their own business website (not a profile on someone else's site)
+
+INVALID results — NEVER include these:
+- Directories or lead-gen sites: Yelp, Angi, HomeAdvisor, Thumbtack, BBB, Houzz, Porch, Bark, Networx, BuildZoom, YellowPages, WhitePages, Manta
+- DIY / editorial / media sites: ThisOldHouse, TodaysHomeowner, BobVila, Forbes, Hometips, WikiHow, Reddit
+- National chains or franchises: Roto-Rooter (if national listing), ServiceMaster, ServicePro, Mr. Rooter, One Hour
+- Manufacturers or suppliers: Lennox, Trane, Carrier, Rheem, Kohler, Moen, Procore, any software company
+- Social media or search: Google, Facebook, Instagram, YouTube, Bing, Nextdoor
+- Aggregators: Thumbtack, TaskRabbit, Amazon Home Services
+
+Before returning any domain, ask yourself: "Is this an actual local ${industry} business that sends technicians to homes/businesses in ${location || "this area"}?" If not, exclude it.
+
+Return ONLY a JSON array of valid local business domains: ["localbusiness1.com", "localbusiness2.com"]`;
 
     // Run all searches in parallel to avoid timeout
     const searchResults = await Promise.allSettled(searches.map(async (query) => {
@@ -1177,7 +1200,19 @@ STRICT RULES:
         system: systemPrompt,
         messages: [{
           role: "user",
-          content: `Search Google for: "${query}"\n\nFind the websites of LOCAL ${industry} businesses in the results. Ignore directories like Yelp, Angie, HomeAdvisor.\nReturn ONLY a JSON array of their domains: ["example.com", "another.com"]`
+          content: `Search Google for: "${query}"
+
+Look through ALL results and identify ONLY actual local ${industry} businesses that serve ${location || clientName}.
+These must be companies that send real technicians to do ${industry} work at homes/businesses.
+
+EXCLUDE everything that is not a local ${industry} service business:
+- No directories: Yelp, Angi, HomeAdvisor, Thumbtack, YellowPages, Houzz, Porch, Bark
+- No media/DIY sites: TodaysHomeowner, BobVila, ThisOldHouse, Forbes, WikiHow
+- No manufacturers: Lennox, Trane, Carrier, Kohler, Moen, Procore
+- No national chains or franchise listing pages
+- No social media, no software companies, no general contractors unrelated to ${industry}
+
+Return ONLY a JSON array of real local business domains: ["localbusiness.com", "another.com"]`
         }],
       });
 
