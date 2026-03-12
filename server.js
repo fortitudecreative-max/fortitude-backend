@@ -1167,56 +1167,51 @@ STRICT RULES:
 - ONLY return: small/mid-size local business websites that directly provide ${industry} services
 - Return results as a plain JSON array: ["domain1.com", "domain2.com"]`;
 
-    let allDomains = [];
+    // Run all searches in parallel to avoid timeout
+    const searchResults = await Promise.allSettled(searches.map(async (query) => {
+      const resp = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 800,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        tool_choice: { type: "any" },
+        system: systemPrompt,
+        messages: [{
+          role: "user",
+          content: `Search Google for: "${query}"\n\nFind the websites of LOCAL ${industry} businesses in the results. Ignore directories like Yelp, Angie, HomeAdvisor.\nReturn ONLY a JSON array of their domains: ["example.com", "another.com"]`
+        }],
+      });
 
-    for (const query of searches) {
-      if (allDomains.length >= 8) break;
-      try {
-        const resp = await anthropic.messages.create({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 800,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-          tool_choice: { type: "any" }, // force a search, not a guess
-          system: systemPrompt,
-          messages: [{
-            role: "user",
-            content: `Search Google for: "${query}"
-            
-Find the websites of LOCAL ${industry} businesses in the results. Ignore directories like Yelp, Angie, HomeAdvisor.
-Return ONLY a JSON array of their domains: ["example.com", "another.com"]`
-          }],
-        });
+      const found = extractDomains(resp.content);
 
-        const found = extractDomains(resp.content);
-
-        // Also parse any JSON array Claude returned in its text response
-        const textBlock = resp.content.find(b => b.type === "text");
-        const raw = textBlock?.text?.trim() || "";
-        const arrayMatch = raw.match(/\[[\s\S]*?\]/);
-        if (arrayMatch) {
-          try {
-            const parsed = JSON.parse(arrayMatch[0]);
-            if (Array.isArray(parsed)) {
-              parsed.forEach(d => {
-                if (typeof d === "string") {
-                  const clean = d.toLowerCase()
-                    .replace(/https?:\/\//, "")
-                    .replace(/^www\./, "")
-                    .split("/")[0].trim();
-                  if (clean && !isDomainExcluded(clean)) found.push(clean);
-                }
-              });
-            }
-          } catch(e) {}
-        }
-
-        console.log(`[Competitors] "${query}" → found: ${found.slice(0,6).join(", ") || "none"}`);
-        allDomains.push(...found);
-        allDomains = [...new Set(allDomains)].filter(d => !isDomainExcluded(d));
-      } catch(searchErr) {
-        console.log(`[Competitors] Search failed for "${query}":`, searchErr.message);
+      // Also parse any JSON array Claude returned in its text response
+      const textBlock = resp.content.find(b => b.type === "text");
+      const raw = textBlock?.text?.trim() || "";
+      const arrayMatch = raw.match(/\[[\s\S]*?\]/);
+      if (arrayMatch) {
+        try {
+          const parsed = JSON.parse(arrayMatch[0]);
+          if (Array.isArray(parsed)) {
+            parsed.forEach(d => {
+              if (typeof d === "string") {
+                const clean = d.toLowerCase()
+                  .replace(/https?:\/\//, "")
+                  .replace(/^www\./, "")
+                  .split("/")[0].trim();
+                if (clean && !isDomainExcluded(clean)) found.push(clean);
+              }
+            });
+          }
+        } catch(e) {}
       }
+      console.log(`[Competitors] "${query}" -> found: ${found.slice(0,6).join(", ") || "none"}`);
+      return found;
+    }));
+
+    let allDomains = [];
+    for (const r of searchResults) {
+      if (r.status === "fulfilled") allDomains.push(...r.value);
     }
+    allDomains = [...new Set(allDomains)].filter(d => !isDomainExcluded(d));
 
     const competitors = allDomains.slice(0, 5);
     console.log(`[Competitors] Final list for ${clientName} (${industry}/${location}): ${competitors.join(", ")}`);
