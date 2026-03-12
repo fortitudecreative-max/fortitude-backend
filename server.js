@@ -1126,18 +1126,34 @@ app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
     const wpBase = client.wordpress_url.replace(/\/$/, "");
     const basicAuth = "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64");
 
-    // Check Yoast status via REST API yoast_head_json - works with Basic auth on all WP sites, no plugin needed.
-    // Green = Yoast has processed the post and set a title + description.
+    // Read the actual Yoast score from the WP edit page - the most accurate source.
+    // The edit page sidebar shows real-time Yoast scores including Premium indexable scores.
+    // The posts list can show "na" due to indexable sync lag on Premium sites.
+    const editRes = await axios.get(
+      `${wpBase}/wp-admin/post.php?post=${postId}&action=edit`,
+      { headers: { "Authorization": basicAuth }, httpsAgent, timeout: 15000, maxRedirects: 5 }
+    );
+    const html = editRes.data;
+
+    // Yoast Premium adds data-score="good|ok|bad|na" to sidebar score indicators
+    // Classic editor adds class="wpseo-score-icon good|ok|bad|na" inside the metabox
+    const scoreMatch = html.match(/wpseo-score-icon (good|ok|bad|na)/);
+    if (scoreMatch) {
+      const scoreClass = scoreMatch[1];
+      const green = scoreClass === "good" || scoreClass === "ok";
+      console.log(`[YoastCheck] Post ${postId}: score="${scoreClass}" green=${green} (edit page)`);
+      return res.json({ green, score_class: scoreClass, source: "wp_edit_page" });
+    }
+
+    // Fallback: check yoast_head_json via REST - if title+desc are set, Yoast has processed it
     const postRes = await axios.get(
       `${wpBase}/wp-json/wp/v2/posts/${postId}?context=edit&_fields=id,yoast_head_json`,
-      { headers: authHeaders, httpsAgent, timeout: 10000 }
+      { headers: { "Authorization": basicAuth, "Content-Type": "application/json" }, httpsAgent, timeout: 10000 }
     );
     const yoast = postRes.data?.yoast_head_json || {};
-    const hasTitle = !!(yoast.title);
-    const hasDesc = !!(yoast.description);
-    const green = hasTitle && hasDesc;
-    console.log(`[YoastCheck] Post ${postId}: title=${hasTitle} desc=${hasDesc} green=${green}`);
-    return res.json({ green, has_title: hasTitle, has_desc: hasDesc, source: "yoast_head_json" });
+    const green = !!(yoast.title && yoast.description);
+    console.log(`[YoastCheck] Post ${postId}: REST fallback title=${!!yoast.title} desc=${!!yoast.description} green=${green}`);
+    return res.json({ green, source: "yoast_head_json_fallback" });
 
   } catch (err) {
     console.error("[YoastCheck] Error:", err.message);
