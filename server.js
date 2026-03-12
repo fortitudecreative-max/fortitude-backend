@@ -1077,58 +1077,66 @@ app.get("/api/keywords/gap", async (req, res) => {
 });
 
 // ─── COMPETITOR FINDER ───────────────────────────────────────────
-// Searches Google for local competitors in the client's industry + service area.
-// Uses Claude with web_search to find real local business websites only.
+// Step 1: Search for local business domains (5 parallel queries)
+// Step 2: Fetch each candidate homepage and confirm industry keyword appears on page
 app.post("/api/competitors/find", async (req, res) => {
   const { clientName, industry, domain, serviceArea } = req.body;
   if (!clientName || !industry) return res.status(400).json({ error: "clientName and industry required" });
 
   const location = serviceArea || "";
   const excludeDomain = (domain || "").toLowerCase().replace(/https?:\/\//, "").replace(/^www\./, "").split("/")[0];
+  const industryLower = industry.toLowerCase();
 
-  // Directories, aggregators, manufacturers, national chains — never real local competitors
-  const EXCLUDE_PATTERNS = [
-    // Directories & lead-gen
+  // Industry keyword synonyms for homepage verification
+  const INDUSTRY_KEYWORDS = {
+    plumbing:    ["plumbing", "plumber", "drain", "pipe", "water heater", "sewer", "leak"],
+    hvac:        ["hvac", "heating", "cooling", "air conditioning", "furnace", "heat pump", "ac repair"],
+    electrical:  ["electrical", "electrician", "wiring", "circuit", "panel", "outlet"],
+    roofing:     ["roofing", "roofer", "roof repair", "shingle", "gutter"],
+    landscaping: ["landscaping", "lawn", "mowing", "landscape", "irrigation"],
+    painting:    ["painting", "painter", "interior paint", "exterior paint"],
+    flooring:    ["flooring", "hardwood", "tile", "carpet", "laminate"],
+    cleaning:    ["cleaning", "maid", "janitorial", "housekeeping"],
+    pest:        ["pest", "exterminator", "termite", "rodent", "insect"],
+    concrete:    ["concrete", "driveway", "patio", "foundation"],
+  };
+  const keywords = INDUSTRY_KEYWORDS[industryLower] || [industryLower];
+
+  const NEVER_INCLUDE = [
     "yelp","angi","angie","homeadvisor","thumbtack","bbb","angieslist","houzz",
     "porch.com","buildzoom","improvenet","networx","fixr","bark.com","taskrabbit",
     "manta.com","yellowpages","whitepages","citysearch","mapquest","tripadvisor",
-    "homewyse","costimates","thumbtack","craftjack","modernize","homeguide",
-    // Social / search
-    "google","facebook","instagram","youtube","linkedin","bing","yahoo","nextdoor",
-    "twitter","tiktok","pinterest","reddit","quora",
-    // Media / DIY / editorial
-    "wikipedia","wikihow","forbes","businessinsider","cnn","bbc","thisoldhouse",
-    "todayshomeowner","todayshomeowner","bobvila","hometips","familyhandyman",
-    "thespruce","bobvila","apartmenttherapy","houselogic","realtor","zillow","apartments",
-    // Manufacturers / suppliers
-    "lennox","carrier","trane","goodman","rheem","york","daikin","bryant","american-standard",
-    "kohler","moen","delta","grohe","bosch","acehardware","lowes","homedepot","amazon",
-    // Software / B2B / unrelated
-    "procore","buildertrend","jobber","servicetitan","housecall","indeed","glassdoor",
-    "amazon","indeed","craigslist",
-    // National chains (domain fragments)
-    "rotorooter","servicemaster","servpro","mrhandyman","mrroofing","ars-rescue",
-    "onehourheat","benjaminfranklinplumbing","mrrooter",
+    "homewyse","craftjack","modernize","homeguide","google","facebook","instagram",
+    "youtube","linkedin","bing","yahoo","nextdoor","twitter","tiktok","pinterest",
+    "reddit","quora","wikipedia","wikihow","forbes","businessinsider","cnn","bbc",
+    "thisoldhouse","todayshomeowner","bobvila","hometips","familyhandyman","thespruce",
+    "houselogic","realtor","zillow","apartments","trulia","lennox","carrier","trane",
+    "goodman","rheem","york","daikin","bryant","kohler","moen","delta","grohe","bosch",
+    "acehardware","lowes","homedepot","amazon","procore","buildertrend","jobber",
+    "servicetitan","housecall","indeed","glassdoor","craigslist","rotorooter",
+    "servicemaster","servpro","mrhandyman","ars-rescue","onehourheat","benjaminfranklinplumbing",
   ];
 
   const isDomainExcluded = (d) => {
     if (!d || d.length < 4) return true;
     const lower = d.toLowerCase();
-    // Exclude the client's own domain
     if (excludeDomain && lower.includes(excludeDomain)) return true;
-    // Exclude client name
     if (clientName) {
       const firstName = clientName.toLowerCase().split(" ")[0];
       if (firstName.length > 3 && lower.includes(firstName)) return true;
     }
-    // Exclude directories/aggregators/brands
-    if (EXCLUDE_PATTERNS.some(p => lower.includes(p))) return true;
-    // Exclude domains with too many subdomains (likely CDN/tracking)
+    if (NEVER_INCLUDE.some(p => lower.includes(p))) return true;
     if ((lower.match(/\./g) || []).length > 2) return true;
     return false;
   };
 
-  // Extract domains from Claude response blocks (tool_result + text)
+  const cleanDomain = (raw) => {
+    if (typeof raw !== "string") return null;
+    return raw.toLowerCase()
+      .replace(/https?:\/\//, "").replace(/^www\./, "")
+      .split("/")[0].split("?")[0].trim();
+  };
+
   const extractDomains = (blocks) => {
     const domains = new Set();
     for (const block of blocks) {
@@ -1140,129 +1148,117 @@ app.post("/api/competitors/find", async (req, res) => {
         text = block.text;
       }
       if (!text) continue;
-      // Extract from URLs
       const urlMatches = [...text.matchAll(/https?:\/\/(?:www\.)?([a-z0-9][a-z0-9\-\.]*\.[a-z]{2,6})/gi)];
       urlMatches.forEach(m => {
-        const d = m[1].toLowerCase().replace(/\.$/, "").split("/")[0];
-        if (!isDomainExcluded(d)) domains.add(d);
+        const d = cleanDomain(m[0]);
+        if (d && !isDomainExcluded(d)) domains.add(d);
       });
-      // Extract plain domains that look like business websites
       const plainMatches = [...text.matchAll(/\b([a-z0-9][a-z0-9\-]+\.(?:com|net|org|co))\b/gi)];
       plainMatches.forEach(m => {
-        const d = m[1].toLowerCase();
-        if (!isDomainExcluded(d)) domains.add(d);
+        const d = cleanDomain(m[1]);
+        if (d && !isDomainExcluded(d)) domains.add(d);
       });
+      const arrayMatch = text.match(/\[[\s\S]*?\]/);
+      if (arrayMatch) {
+        try {
+          const parsed = JSON.parse(arrayMatch[0]);
+          if (Array.isArray(parsed)) {
+            parsed.forEach(item => {
+              const d = cleanDomain(typeof item === "string" ? item : item?.domain);
+              if (d && !isDomainExcluded(d)) domains.add(d);
+            });
+          }
+        } catch(e) {}
+      }
     }
     return [...domains];
+  };
+
+  // Fetch a homepage and check if industry keywords appear in the text
+  const verifyByFetch = async (domain) => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
+      const resp = await fetch(`https://${domain}`, {
+        signal: controller.signal,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; bot/1.0)" },
+      });
+      clearTimeout(timeout);
+      const html = await resp.text();
+      const text = html.replace(/<[^>]+>/g, " ").toLowerCase();
+      const matched = keywords.some(kw => text.includes(kw));
+      console.log(`[Competitors] Verify ${domain}: ${matched ? "PASS" : "FAIL"} (checked: ${keywords.join(", ")})`);
+      return matched;
+    } catch(e) {
+      // If we can't fetch the page, give it the benefit of the doubt
+      console.log(`[Competitors] Verify ${domain}: fetch failed (${e.message}) - keeping`);
+      return true;
+    }
   };
 
   try {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-    // These are the exact Google-style searches that surface local business websites
-    const searches = location ? [
-      `${industry} companies ${location}`,
-      `${industry} services ${location} site:*.com`,
-      `local ${industry} contractors ${location}`,
-    ] : [
-      `${industry} companies near ${clientName}`,
-      `local ${industry} contractors`,
+    const city = location.split(",")[0].trim();
+    const stateOrRegion = location.split(",")[1]?.trim() || "";
+    const regionLabel = stateOrRegion ? `${city} ${stateOrRegion}` : city;
+
+    // 5 search angles to maximize candidate pool
+    const searches = [
+      `${industry} company ${location}`,
+      `${industry} services ${regionLabel}`,
+      `local ${industry} contractor ${regionLabel}`,
+      `${industry} repair near ${city}`,
+      `${industry} ${stateOrRegion || city}`,
     ];
 
-    const systemPrompt = `You are a local competitor research tool.
-Search Google and find the websites of LOCAL ${industry} service companies near ${location || clientName}.
+    console.log(`[Competitors] Searching for ${industry} near ${location}`);
 
-A valid result is a small or mid-size LOCAL business that:
-- Actually performs ${industry} services directly (installs, repairs, maintains)
-- Serves the ${location || "local"} area specifically
-- Has their own business website (not a profile on someone else's site)
-
-INVALID results — NEVER include these:
-- Directories or lead-gen sites: Yelp, Angi, HomeAdvisor, Thumbtack, BBB, Houzz, Porch, Bark, Networx, BuildZoom, YellowPages, WhitePages, Manta
-- DIY / editorial / media sites: ThisOldHouse, TodaysHomeowner, BobVila, Forbes, Hometips, WikiHow, Reddit
-- National chains or franchises: Roto-Rooter (if national listing), ServiceMaster, ServicePro, Mr. Rooter, One Hour
-- Manufacturers or suppliers: Lennox, Trane, Carrier, Rheem, Kohler, Moen, Procore, any software company
-- Social media or search: Google, Facebook, Instagram, YouTube, Bing, Nextdoor
-- Aggregators: Thumbtack, TaskRabbit, Amazon Home Services
-
-Before returning any domain, ask yourself: "Is this an actual local ${industry} business that sends technicians to homes/businesses in ${location || "this area"}?" If not, exclude it.
-
-Return ONLY a JSON array of valid local business domains: ["localbusiness1.com", "localbusiness2.com"]`;
-
-    // Run all searches in parallel to avoid timeout
     const searchResults = await Promise.allSettled(searches.map(async (query) => {
       const resp = await anthropic.messages.create({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 800,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         tool_choice: { type: "any" },
-        system: systemPrompt,
-        messages: [{
-          role: "user",
-          content: `Search Google for: "${query}"
-
-Look through ALL results and identify ONLY actual local ${industry} businesses that serve ${location || clientName}.
-These must be companies that send real technicians to do ${industry} work at homes/businesses.
-
-EXCLUDE everything that is not a local ${industry} service business:
-- No directories: Yelp, Angi, HomeAdvisor, Thumbtack, YellowPages, Houzz, Porch, Bark
-- No media/DIY sites: TodaysHomeowner, BobVila, ThisOldHouse, Forbes, WikiHow
-- No manufacturers: Lennox, Trane, Carrier, Kohler, Moen, Procore
-- No national chains or franchise listing pages
-- No social media, no software companies, no general contractors unrelated to ${industry}
-
-Return ONLY a JSON array of real local business domains: ["localbusiness.com", "another.com"]`
-        }],
+        system: `Find LOCAL ${industry} business websites from Google search results. Return ONLY a JSON array of domains like ["business1.com","business2.com"]. Never include directories, aggregators, or media sites.`,
+        messages: [{ role: "user", content: `Search: "${query}" — list local ${industry} business websites as JSON array.` }],
       });
-
-      const found = extractDomains(resp.content);
-
-      // Also parse any JSON array Claude returned in its text response
-      const textBlock = resp.content.find(b => b.type === "text");
-      const raw = textBlock?.text?.trim() || "";
-      const arrayMatch = raw.match(/\[[\s\S]*?\]/);
-      if (arrayMatch) {
-        try {
-          const parsed = JSON.parse(arrayMatch[0]);
-          if (Array.isArray(parsed)) {
-            parsed.forEach(d => {
-              if (typeof d === "string") {
-                const clean = d.toLowerCase()
-                  .replace(/https?:\/\//, "")
-                  .replace(/^www\./, "")
-                  .split("/")[0].trim();
-                if (clean && !isDomainExcluded(clean)) found.push(clean);
-              }
-            });
-          }
-        } catch(e) {}
-      }
-      console.log(`[Competitors] "${query}" -> found: ${found.slice(0,6).join(", ") || "none"}`);
-      return found;
+      return extractDomains(resp.content);
     }));
 
-    let allDomains = [];
+    let candidates = [];
     for (const r of searchResults) {
-      if (r.status === "fulfilled") allDomains.push(...r.value);
+      if (r.status === "fulfilled") candidates.push(...r.value);
     }
-    allDomains = [...new Set(allDomains)].filter(d => !isDomainExcluded(d));
+    candidates = [...new Set(candidates)].filter(d => !isDomainExcluded(d));
+    console.log(`[Competitors] Candidates (${candidates.length}): ${candidates.join(", ")}`);
 
-    const competitors = allDomains.slice(0, 5);
-    console.log(`[Competitors] Final list for ${clientName} (${industry}/${location}): ${competitors.join(", ")}`);
-
-    if (!competitors.length) {
-      return res.status(500).json({
-        error: `Could not find local ${industry} competitors in ${location || "your area"}. Make sure Service Area is set in Edit Client.`
-      });
+    if (!candidates.length) {
+      return res.status(500).json({ error: `No candidates found near ${location}. Try a larger city in Service Area.` });
     }
-    res.json({ competitors });
+
+    // Step 2: Verify each candidate by fetching their homepage and checking for industry keywords
+    const verifyResults = await Promise.allSettled(
+      candidates.slice(0, 15).map(async (d) => ({ domain: d, valid: await verifyByFetch(d) }))
+    );
+
+    const verified = verifyResults
+      .filter(r => r.status === "fulfilled" && r.value.valid)
+      .map(r => r.value.domain);
+
+    console.log(`[Competitors] Verified (${verified.length}): ${verified.join(", ")}`);
+
+    // If verification wiped everything out, fall back to candidates (better than empty)
+    const final = (verified.length > 0 ? verified : candidates).slice(0, 5);
+
+    res.json({ competitors: final });
+
   } catch (err) {
     console.error("Competitor find error:", err.message);
     res.status(500).json({ error: "Failed to find competitors", detail: err.message });
   }
 });
-
 app.put("/api/clients/:id/competitors", async (req, res) => {
   const { id } = req.params;
   const { competitors } = req.body;
