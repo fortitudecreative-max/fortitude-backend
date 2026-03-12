@@ -283,10 +283,10 @@ app.post("/api/images/assign-clients", requireAuth, async (req, res) => {
   const inserted = [];
   for (const img of sourceImages) {
     for (const clientId of clientIds) {
-      // Skip if already assigned
+      // Skip only if this client already has a row with this exact filename (loose dupe check)
       const { data: existing } = await supabase.from("image_library")
-        .select("id").eq("client_id", clientId).eq("storage_path", img.storage_path).maybeSingle();
-      if (existing) continue;
+        .select("id").eq("client_id", clientId).eq("filename", img.filename).maybeSingle();
+      if (existing) { console.log(`[Assign] Skipping duplicate filename=${img.filename} for client=${clientId}`); continue; }
       const { data, error } = await supabase.from("image_library").insert([{
         filename: img.filename,
         industry: img.industry,
@@ -295,6 +295,7 @@ app.post("/api/images/assign-clients", requireAuth, async (req, res) => {
         storage_path: img.storage_path,
         client_id: clientId,
       }]).select();
+      if (error) console.error("[Assign] Insert error:", error.message);
       if (!error && data?.[0]) inserted.push(data[0]);
     }
   }
