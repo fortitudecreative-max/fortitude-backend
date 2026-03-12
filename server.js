@@ -1126,41 +1126,47 @@ app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
     const wpBase = client.wordpress_url.replace(/\/$/, "");
     const basicAuth = "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64");
 
-    // Read the actual Yoast score dot from the WP admin posts list HTML.
-    // This is the exact same source of truth as what you see in WordPress.
-    // class="wpseo-score-icon good" = green, "ok" = orange, "bad"/"na" = not green.
-    const editPageRes = await axios.get(
-      `${wpBase}/wp-admin/edit.php?post_type=post`,
-      { headers: { "Authorization": basicAuth }, httpsAgent, timeout: 15000, maxRedirects: 5 }
+    // Check Yoast status via REST API yoast_head_json - works with Basic auth on all WP sites.
+    // A post is "green" (Yoast fully configured) when it has:
+    //   - yoast_head_json.title       (SEO title set)
+    //   - yoast_head_json.description (meta description set)
+    //   - _yoast_wpseo_focuskw        (focus keyword set) -- via Fortitude plugin if available
+    const postRes = await axios.get(
+      `${wpBase}/wp-json/wp/v2/posts/${postId}?context=edit&_fields=id,yoast_head_json,meta`,
+      { headers: authHeaders, httpsAgent, timeout: 10000 }
     );
-    const html = editPageRes.data;
+    const post = postRes.data;
+    const yoast = post?.yoast_head_json || {};
+    const hasTitle = !!(yoast.title);
+    const hasDesc = !!(yoast.description);
 
-    // Find the row for this specific post ID and read its Yoast score class
-    const rowMatch = html.match(new RegExp(`id="post-${postId}"[\s\S]{0,3000}?column-wpseo-score[\s\S]{0,500}?wpseo-score-icon ([\w-]+)`));
-    if (rowMatch) {
-      const scoreClass = rowMatch[1]; // "good", "ok", "bad", "na", "noindex"
-      const green = scoreClass === "good" || scoreClass === "ok";
-      console.log(`[YoastCheck] Post ${postId}: score class="${scoreClass}" green=${green} (source: wp-admin posts list)`);
-      return res.json({ green, score_class: scoreClass, source: "wp_admin_posts_list" });
+    // Focus keyword: try REST meta first, fall back to Fortitude plugin
+    let hasFocusKw = !!(post?.meta?._yoast_wpseo_focuskw);
+    if (!hasFocusKw) {
+      // Try Fortitude plugin caps endpoint to read focus kw
+      try {
+        const seoCaps = await detectSeoCapabilities(wpBase, authHeaders);
+        if (seoCaps?.fortitudePlugin) {
+          const pluginRes = await axios.post(
+            `${wpBase}/wp-json/fortitude/v1/seo-meta`,
+            { post_id: parseInt(postId) },
+            { headers: authHeaders, httpsAgent, timeout: 8000 }
+          );
+          // If plugin responds at all focus kw is likely set - check via recalc scores
+          const recalcRes = await axios.post(
+            `${wpBase}/wp-json/fortitude/v1/yoast-recalc`,
+            { post_id: parseInt(postId) },
+            { headers: authHeaders, httpsAgent, timeout: 10000 }
+          );
+          hasFocusKw = recalcRes.data?.scores_after?.has_focus_keyword === true ||
+                       recalcRes.data?.scores_after?.has_focus_keyword === "1";
+        }
+      } catch(e) {}
     }
 
-    // Post not found on page 1 - try fetching the specific post edit page and reading score from there
-    const singleRes = await axios.get(
-      `${wpBase}/wp-admin/post.php?post=${postId}&action=edit`,
-      { headers: { "Authorization": basicAuth }, httpsAgent, timeout: 15000, maxRedirects: 5 }
-    );
-    const singleHtml = singleRes.data;
-    const singleMatch = singleHtml.match(/wpseo-score-icon ([\w-]+)/);
-    if (singleMatch) {
-      const scoreClass = singleMatch[1];
-      const green = scoreClass === "good" || scoreClass === "ok";
-      console.log(`[YoastCheck] Post ${postId}: score class="${scoreClass}" green=${green} (source: wp-admin edit page)`);
-      return res.json({ green, score_class: scoreClass, source: "wp_admin_edit_page" });
-    }
-
-    // No Yoast score found at all - Yoast may not be installed or post has no score yet
-    console.log(`[YoastCheck] Post ${postId}: no Yoast score found`);
-    return res.json({ green: false, score_class: "na", source: "not_found" });
+    const green = hasTitle && hasDesc && hasFocusKw;
+    console.log(`[YoastCheck] Post ${postId}: title=${hasTitle} desc=${hasDesc} focuskw=${hasFocusKw} green=${green}`);
+    return res.json({ green, has_title: hasTitle, has_desc: hasDesc, has_focus_keyword: hasFocusKw, source: "yoast_head_json" });
 
   } catch (err) {
     console.error("[YoastCheck] Error:", err.message);
