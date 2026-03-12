@@ -52,6 +52,54 @@ app.get("/api/health", (req, res) => res.json({ status: "ok", ts: Date.now() }))
 // All /api/* routes require a valid Supabase session (except /api/health above)
 app.use("/api", requireAuth);
 
+// ─── CLIENTS ────────────────────────────────────────────────────
+app.get("/api/clients", async (req, res) => {
+  const { data, error } = await supabase.from("clients").select("*").order("created_at", { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ clients: data });
+});
+
+app.post("/api/clients", async (req, res) => {
+  const { name, industry, status, domain, wordpress_url, wordpress_username, wordpress_password, brand_voice } = req.body;
+  const { data, error } = await supabase.from("clients").insert([{ name, industry, status: status || "pending", domain, wordpress_url, wordpress_username, wordpress_password, brand_voice }]).select();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ client: data[0] });
+});
+
+app.put("/api/clients/:id", async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+  // industry_tags is a Postgres text[] array - coerce from comma string if needed
+  if (typeof updates.industry_tags === "string") {
+    updates.industry_tags = updates.industry_tags
+      ? updates.industry_tags.split(",").map(t => t.trim()).filter(Boolean)
+      : [];
+  }
+  // Auto-promote to active when a WordPress URL is saved and status is still pending
+  if (updates.wordpress_url && !updates.status) {
+    const { data: existing } = await supabase.from("clients").select("status").eq("id", id).single();
+    if (existing?.status === "pending") updates.status = "active";
+  }
+  const { data, error } = await supabase.from("clients").update(updates).eq("id", id).select();
+  if (error) { console.error("[PUT /clients] Supabase error:", error.message); return res.status(500).json({ error: error.message }); }
+  res.json({ client: data[0] });
+});
+
+app.delete("/api/clients/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    await supabase.from("scheduled_jobs").delete().eq("client_id", id);
+    await supabase.from("client_keyword_queue").delete().eq("client_id", id);
+    await supabase.from("posts").delete().eq("client_id", id);
+    await supabase.from("image_library").delete().eq("client_id", id);
+    const { error } = await supabase.from("clients").delete().eq("id", id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/api/keywords/industries", async (req, res) => {
   const { data, error } = await supabase.from("keyword_library").select("industry").order("industry");
   if (error) return res.status(500).json({ error: error.message });
