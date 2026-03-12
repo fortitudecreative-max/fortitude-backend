@@ -1077,31 +1077,46 @@ app.get("/api/keywords/gap", async (req, res) => {
 });
 
 // ─── COMPETITOR FINDER ───────────────────────────────────────────
-// Uses web_search tool so Claude finds real local competitors from Google results
-// rather than guessing. Requires serviceArea (e.g. "Charlotte, NC") for accuracy.
+// Searches Google for local competitors in the client's industry + service area.
+// Uses Claude with web_search to find real local business websites only.
 app.post("/api/competitors/find", async (req, res) => {
   const { clientName, industry, domain, serviceArea } = req.body;
   if (!clientName || !industry) return res.status(400).json({ error: "clientName and industry required" });
 
   const location = serviceArea || "";
-  const excludeDomain = domain || "";
+  const excludeDomain = (domain || "").toLowerCase().replace(/https?:\/\//, "").replace(/^www\./, "").split("/")[0];
 
+  // Directories, aggregators, manufacturers, national chains — never real local competitors
   const EXCLUDE_PATTERNS = [
-    "yelp","angi","homeadvisor","thumbtack","bbb","angieslist","houzz",
+    "yelp","angi","angie","homeadvisor","thumbtack","bbb","angieslist","houzz",
     "porch.com","google","facebook","instagram","youtube","amazon","indeed",
-    "linkedin","bing","yahoo","acehardware","lowes","homedepot",
-    "lennox","carrier","trane","goodman","rheem","york",
+    "linkedin","bing","yahoo","acehardware","lowes","homedepot","buildzoom",
+    "improvenet","networx","fixr","bark.com","taskrabbit","tripadvisor",
+    "manta.com","yellowpages","whitepages","citysearch","mapquest",
+    "lennox","carrier","trane","goodman","rheem","york","daikin","bryant",
+    "wikipedia","wikihow","reddit","quora","nextdoor","apartments","zillow",
+    "angieslist","homewyse","costimates","forbes","businessinsider","cnn","bbc",
   ];
 
   const isDomainExcluded = (d) => {
-    if (!d) return true;
+    if (!d || d.length < 4) return true;
     const lower = d.toLowerCase();
-    if (excludeDomain && lower.includes(excludeDomain.toLowerCase().replace(/https?:\/\//,""))) return true;
-    if (clientName && lower.includes(clientName.toLowerCase().split(" ")[0])) return true;
-    return EXCLUDE_PATTERNS.some(p => lower.includes(p));
+    // Exclude the client's own domain
+    if (excludeDomain && lower.includes(excludeDomain)) return true;
+    // Exclude client name
+    if (clientName) {
+      const firstName = clientName.toLowerCase().split(" ")[0];
+      if (firstName.length > 3 && lower.includes(firstName)) return true;
+    }
+    // Exclude directories/aggregators/brands
+    if (EXCLUDE_PATTERNS.some(p => lower.includes(p))) return true;
+    // Exclude domains with too many subdomains (likely CDN/tracking)
+    if ((lower.match(/\./g) || []).length > 2) return true;
+    return false;
   };
 
-  const extractDomainsFromBlocks = (blocks) => {
+  // Extract domains from Claude response blocks (tool_result + text)
+  const extractDomains = (blocks) => {
     const domains = new Set();
     for (const block of blocks) {
       let text = "";
@@ -1112,11 +1127,17 @@ app.post("/api/competitors/find", async (req, res) => {
         text = block.text;
       }
       if (!text) continue;
+      // Extract from URLs
       const urlMatches = [...text.matchAll(/https?:\/\/(?:www\.)?([a-z0-9][a-z0-9\-\.]*\.[a-z]{2,6})/gi)];
-      const plainMatches = [...text.matchAll(/\b(?:www\.)?([a-z0-9][a-z0-9\-]+\.[a-z]{2,6})\b/gi)];
-      [...urlMatches, ...plainMatches].forEach(m => {
-        const d = m[1].toLowerCase().replace(/^\./, "");
-        if (d.includes(".") && !isDomainExcluded(d)) domains.add(d);
+      urlMatches.forEach(m => {
+        const d = m[1].toLowerCase().replace(/\.$/, "").split("/")[0];
+        if (!isDomainExcluded(d)) domains.add(d);
+      });
+      // Extract plain domains that look like business websites
+      const plainMatches = [...text.matchAll(/\b([a-z0-9][a-z0-9\-]+\.(?:com|net|org|co))\b/gi)];
+      plainMatches.forEach(m => {
+        const d = m[1].toLowerCase();
+        if (!isDomainExcluded(d)) domains.add(d);
       });
     }
     return [...domains];
@@ -1126,31 +1147,49 @@ app.post("/api/competitors/find", async (req, res) => {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
+    // These are the exact Google-style searches that surface local business websites
     const searches = location ? [
-      `${industry} contractor ${location}`,
-      `best ${industry} company ${location}`,
-      `${industry} repair ${location}`,
+      `${industry} companies ${location}`,
+      `${industry} services ${location} site:*.com`,
+      `local ${industry} contractors ${location}`,
     ] : [
-      `${industry} contractor near ${clientName}`,
-      `best local ${industry} company`,
+      `${industry} companies near ${clientName}`,
+      `local ${industry} contractors`,
     ];
+
+    const systemPrompt = `You are a research tool that finds local competitor business websites.
+Your ONLY job is to search Google and return the website domains of LOCAL ${industry} businesses near ${location || clientName}.
+
+STRICT RULES:
+- Only return domains of ACTUAL LOCAL ${industry} businesses (not directories, not aggregators, not manufacturers)
+- NEVER return: yelp.com, angi.com, homeadvisor.com, thumbtack.com, bbb.org, or ANY review/directory site
+- NEVER return: national brands, manufacturers, or chains
+- ONLY return: small/mid-size local business websites that directly provide ${industry} services
+- Return results as a plain JSON array: ["domain1.com", "domain2.com"]`;
 
     let allDomains = [];
 
     for (const query of searches) {
-      if (allDomains.length >= 5) break;
+      if (allDomains.length >= 8) break;
       try {
         const resp = await anthropic.messages.create({
           model: "claude-haiku-4-5-20251001",
-          max_tokens: 600,
+          max_tokens: 800,
           tools: [{ type: "web_search_20250305", name: "web_search" }],
-          system: "Search the web and return ONLY a JSON array of website domains found. No explanation.",
-          messages: [{ role: "user", content: `Search: "${query}" — list all website domains you find as a JSON array like ["domain1.com","domain2.com"]` }],
+          tool_choice: { type: "any" }, // force a search, not a guess
+          system: systemPrompt,
+          messages: [{
+            role: "user",
+            content: `Search Google for: "${query}"
+            
+Find the websites of LOCAL ${industry} businesses in the results. Ignore directories like Yelp, Angie, HomeAdvisor.
+Return ONLY a JSON array of their domains: ["example.com", "another.com"]`
+          }],
         });
 
-        const fromBlocks = extractDomainsFromBlocks(resp.content);
+        const found = extractDomains(resp.content);
 
-        // Also try parsing JSON array from text block
+        // Also parse any JSON array Claude returned in its text response
         const textBlock = resp.content.find(b => b.type === "text");
         const raw = textBlock?.text?.trim() || "";
         const arrayMatch = raw.match(/\[[\s\S]*?\]/);
@@ -1160,25 +1199,32 @@ app.post("/api/competitors/find", async (req, res) => {
             if (Array.isArray(parsed)) {
               parsed.forEach(d => {
                 if (typeof d === "string") {
-                  const clean = d.toLowerCase().replace(/https?:\/\//, "").replace(/^\.?www\./, "").split("/")[0];
-                  if (clean && !isDomainExcluded(clean)) fromBlocks.push(clean);
+                  const clean = d.toLowerCase()
+                    .replace(/https?:\/\//, "")
+                    .replace(/^www\./, "")
+                    .split("/")[0].trim();
+                  if (clean && !isDomainExcluded(clean)) found.push(clean);
                 }
               });
             }
           } catch(e) {}
         }
 
-        console.log(`[Competitors] "${query}" → ${fromBlocks.slice(0,5).join(", ") || "none"}`);
-        allDomains.push(...fromBlocks);
+        console.log(`[Competitors] "${query}" → found: ${found.slice(0,6).join(", ") || "none"}`);
+        allDomains.push(...found);
         allDomains = [...new Set(allDomains)].filter(d => !isDomainExcluded(d));
       } catch(searchErr) {
-        console.log(`[Competitors] Search error for "${query}":`, searchErr.message);
+        console.log(`[Competitors] Search failed for "${query}":`, searchErr.message);
       }
     }
 
     const competitors = allDomains.slice(0, 5);
+    console.log(`[Competitors] Final list for ${clientName} (${industry}/${location}): ${competitors.join(", ")}`);
+
     if (!competitors.length) {
-      return res.status(500).json({ error: "Could not find local competitors. Add a service area in Edit Client and retry." });
+      return res.status(500).json({
+        error: `Could not find local ${industry} competitors in ${location || "your area"}. Make sure Service Area is set in Edit Client.`
+      });
     }
     res.json({ competitors });
   } catch (err) {
