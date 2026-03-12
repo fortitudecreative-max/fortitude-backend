@@ -1126,47 +1126,18 @@ app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
     const wpBase = client.wordpress_url.replace(/\/$/, "");
     const basicAuth = "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64");
 
-    // Check Yoast status via REST API yoast_head_json - works with Basic auth on all WP sites.
-    // A post is "green" (Yoast fully configured) when it has:
-    //   - yoast_head_json.title       (SEO title set)
-    //   - yoast_head_json.description (meta description set)
-    //   - _yoast_wpseo_focuskw        (focus keyword set) -- via Fortitude plugin if available
+    // Check Yoast status via REST API yoast_head_json - works with Basic auth on all WP sites, no plugin needed.
+    // Green = Yoast has processed the post and set a title + description.
     const postRes = await axios.get(
-      `${wpBase}/wp-json/wp/v2/posts/${postId}?context=edit&_fields=id,yoast_head_json,meta`,
+      `${wpBase}/wp-json/wp/v2/posts/${postId}?context=edit&_fields=id,yoast_head_json`,
       { headers: authHeaders, httpsAgent, timeout: 10000 }
     );
-    const post = postRes.data;
-    const yoast = post?.yoast_head_json || {};
+    const yoast = postRes.data?.yoast_head_json || {};
     const hasTitle = !!(yoast.title);
     const hasDesc = !!(yoast.description);
-
-    // Focus keyword: try REST meta first, fall back to Fortitude plugin
-    let hasFocusKw = !!(post?.meta?._yoast_wpseo_focuskw);
-    if (!hasFocusKw) {
-      // Try Fortitude plugin caps endpoint to read focus kw
-      try {
-        const seoCaps = await detectSeoCapabilities(wpBase, authHeaders);
-        if (seoCaps?.fortitudePlugin) {
-          const pluginRes = await axios.post(
-            `${wpBase}/wp-json/fortitude/v1/seo-meta`,
-            { post_id: parseInt(postId) },
-            { headers: authHeaders, httpsAgent, timeout: 8000 }
-          );
-          // If plugin responds at all focus kw is likely set - check via recalc scores
-          const recalcRes = await axios.post(
-            `${wpBase}/wp-json/fortitude/v1/yoast-recalc`,
-            { post_id: parseInt(postId) },
-            { headers: authHeaders, httpsAgent, timeout: 10000 }
-          );
-          hasFocusKw = recalcRes.data?.scores_after?.has_focus_keyword === true ||
-                       recalcRes.data?.scores_after?.has_focus_keyword === "1";
-        }
-      } catch(e) {}
-    }
-
-    const green = hasTitle && hasDesc && hasFocusKw;
-    console.log(`[YoastCheck] Post ${postId}: title=${hasTitle} desc=${hasDesc} focuskw=${hasFocusKw} green=${green}`);
-    return res.json({ green, has_title: hasTitle, has_desc: hasDesc, has_focus_keyword: hasFocusKw, source: "yoast_head_json" });
+    const green = hasTitle && hasDesc;
+    console.log(`[YoastCheck] Post ${postId}: title=${hasTitle} desc=${hasDesc} green=${green}`);
+    return res.json({ green, has_title: hasTitle, has_desc: hasDesc, source: "yoast_head_json" });
 
   } catch (err) {
     console.error("[YoastCheck] Error:", err.message);
