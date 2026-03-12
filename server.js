@@ -46,7 +46,7 @@ const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const wpAdminUpdate = async (wpBase, wpUser, wpPass, postId) => {
   wpBase = wpBase.replace(/\/$/, "");
 
-  // Step 1: Log in via wp-login.php to get a session cookie
+  // Step 1: Log in via wp-login.php to get a real session cookie
   const loginForm = new URLSearchParams({
     log: wpUser,
     pwd: wpPass,
@@ -62,7 +62,7 @@ const wpAdminUpdate = async (wpBase, wpUser, wpPass, postId) => {
     timeout: 15000,
   });
 
-  // Extract all Set-Cookie headers and build a cookie string
+  // Extract session cookies
   const setCookies = loginRes.headers["set-cookie"] || [];
   const cookieStr = setCookies.map(c => c.split(";")[0]).join("; ");
   if (!cookieStr || (!cookieStr.includes("wordpress_logged_in") && !cookieStr.includes("wordpress_sec"))) {
@@ -70,26 +70,56 @@ const wpAdminUpdate = async (wpBase, wpUser, wpPass, postId) => {
     return;
   }
 
-  // Step 2: Load the edit page with the session cookie to get the nonce
+  // Step 2: Load the edit page to get nonce + all Yoast hidden fields
+  // Yoast Premium stores scores via JS-populated hidden inputs (linkdex, content_score, etc.)
+  // These are already pre-populated in the page HTML from the last save — we just need to
+  // include them in our POST so Yoast saves the scores correctly.
   const editRes = await axios.get(`${wpBase}/wp-admin/post.php?post=${postId}&action=edit`, {
     headers: { "Cookie": cookieStr },
     httpsAgent,
     timeout: 15000,
     maxRedirects: 5,
   });
-  const nonce = editRes.data.match(/name="_wpnonce"[^>]*value="([^"]+)"/)?.[1];
+  const html = editRes.data;
+
+  const nonce = html.match(/name="_wpnonce"[^>]*value="([^"]+)"/)?.[1];
   if (!nonce) {
     console.log(`[WPUpdate] No nonce found for post ${postId} — skipping Update`);
     return;
   }
 
-  // Step 3: POST action=editpost — same as clicking Update in the editor
+  // Extract all Yoast hidden field values from the page HTML
+  const extractField = (name) => {
+    const m = html.match(new RegExp(`name="${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"[^>]*value="([^"]*)"`))
+      || html.match(new RegExp(`id="${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"[^>]*value="([^"]*)"`));
+    return m?.[1] || "";
+  };
+  const extractTextarea = (name) => {
+    const m = html.match(new RegExp(`name="${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"[^>]*>([^<]*)<\/textarea>`));
+    return m?.[1] || "";
+  };
+
+  // Step 3: POST action=editpost with all required Yoast fields included
+  // This is what WP sends when you actually click Update — Yoast reads these
+  // fields in its save_post hook to store scores in the indexables table.
   const updateForm = new URLSearchParams({
     _wpnonce: nonce,
     action: "editpost",
     post_ID: String(postId),
     post_status: "publish",
     save: "Update",
+    // Yoast metabox fields
+    "wpseo_meta-hide": "wpseo_meta",
+    yoast_free_metabox_nonce: extractField("yoast_free_metabox_nonce"),
+    yoast_wpseo_focuskw: extractField("yoast_wpseo_focuskw"),
+    yoast_wpseo_title: extractField("yoast_wpseo_title"),
+    yoast_wpseo_metadesc: extractField("yoast_wpseo_metadesc"),
+    yoast_wpseo_linkdex: extractField("yoast_wpseo_linkdex") || "0",
+    yoast_wpseo_content_score: extractField("yoast_wpseo_content_score") || "0",
+    yoast_wpseo_inclusive_language_score: extractField("yoast_wpseo_inclusive_language_score") || "0",
+    yoast_wpseo_is_cornerstone: extractField("yoast_wpseo_is_cornerstone") || "false",
+    yoast_wpseo_focuskeywords: extractField("yoast_wpseo_focuskeywords"),
+    yoast_wpseo_keywordsynonyms: extractField("yoast_wpseo_keywordsynonyms"),
   });
   await axios.post(`${wpBase}/wp-admin/post.php`, updateForm.toString(), {
     headers: { "Content-Type": "application/x-www-form-urlencoded", "Cookie": cookieStr },
@@ -97,7 +127,7 @@ const wpAdminUpdate = async (wpBase, wpUser, wpPass, postId) => {
     timeout: 15000,
     maxRedirects: 5,
   });
-  console.log(`[WPUpdate] ✓ Classic editor Update fired for post ${postId} — Yoast dots will be green`);
+  console.log(`[WPUpdate] ✓ Classic editor Update with Yoast fields fired for post ${postId}`);
 };
 
 // ─── YOAST / SEO PLUGIN DETECTION ────────────────────────────────────────────
