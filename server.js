@@ -49,6 +49,9 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.get("/api/health", (req, res) => res.json({ status: "ok", ts: Date.now() }));
 
+// All /api/* routes require a valid Supabase session (except /api/health above)
+app.use("/api", requireAuth);
+
 app.get("/api/keywords/industries", async (req, res) => {
   const { data, error } = await supabase.from("keyword_library").select("industry").order("industry");
   if (error) return res.status(500).json({ error: error.message });
@@ -4319,4 +4322,4 @@ app.listen(PORT, () => {
   console.log("✓ Anthropic: " + (ANTHROPIC_API_KEY ? "loaded" : "MISSING"));
   console.log("✓ Supabase: " + (SUPABASE_URL ? "loaded" : "MISSING"));
 });
-// redeploy Thu Mar 12 16:55:18 UTC 2026
+ Thu Mar 12 16:55:18 UTC 2026
