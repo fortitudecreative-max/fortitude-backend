@@ -312,6 +312,13 @@ app.delete("/api/clients/:id", async (req, res) => {
 });
 
 // ─── KEYWORD LIBRARY ─────────────────────────────────────────────
+app.get("/api/keywords/industries", async (req, res) => {
+  const { data, error } = await supabase.from("keyword_library").select("industry").order("industry");
+  if (error) return res.status(500).json({ error: error.message });
+  const industries = [...new Set((data || []).map(r => r.industry).filter(Boolean))].sort();
+  res.json({ industries });
+});
+
 app.get("/api/keywords/library", async (req, res) => {
   const { industry } = req.query;
   let query = supabase.from("keyword_library").select("*").order("volume", { ascending: false });
