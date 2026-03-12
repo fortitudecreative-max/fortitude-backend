@@ -606,9 +606,50 @@ Current (${post.metaDescription.length} chars): ${post.metaDescription}` }],
   }
 });
 
+// ─── WP CATEGORIES + SMART MATCH ────────────────────────────────
+// Fetches all categories from WP and uses Claude to pick the best one for the post.
+app.post("/api/wordpress/categories", requireAuth, async (req, res) => {
+  const { wordpressUrl, wpUsername, wpPassword, keyword, title, industry } = req.body;
+  if (!wordpressUrl || !wpUsername || !wpPassword) return res.status(400).json({ error: "WP credentials required" });
+  try {
+    const credentials = Buffer.from(`${wpUsername}:${wpPassword}`).toString("base64");
+    const authHeaders = { "Authorization": `Basic ${credentials}` };
+    const catRes = await axios.get(`${wordpressUrl}/wp-json/wp/v2/categories?per_page=100`, { headers: authHeaders, httpsAgent });
+    const categories = (catRes.data || []).filter(c => c.slug !== "uncategorized");
+    if (!categories.length) return res.json({ categories: [], bestMatchId: null });
+
+    // Use Claude to pick the best category given the post keyword and title
+    const Anthropic = require("@anthropic-ai/sdk");
+    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+    const catList = categories.map(c => `ID ${c.id}: "${c.name}"`).join("\n");
+    const resp = await anthropic.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 100,
+      messages: [{
+        role: "user",
+        content: `A ${industry} blog post with keyword "${keyword}" and title "${title}" needs to be assigned a WordPress category.
+
+Available categories:
+${catList}
+
+Return ONLY the numeric ID of the single best matching category. No explanation, just the number.
+Pick the category most relevant to the specific topic of the post. If none fit well, return 0.`,
+      }],
+    });
+    const raw = resp.content[0]?.text?.trim() || "0";
+    const bestId = parseInt(raw.match(/\d+/)?.[0] || "0");
+    const validMatch = categories.find(c => c.id === bestId);
+    console.log(`[Categories] "${keyword}" -> best match: ${validMatch?.name || "none"} (ID ${bestId})`);
+    res.json({ categories, bestMatchId: validMatch ? bestId : (categories[0]?.id || null) });
+  } catch(err) {
+    console.error("[Categories] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── WORDPRESS PUBLISHING ───────────────────────────────────────
 app.post("/api/publish/wordpress", async (req, res) => {
-  let { postId, clientId, title, content, slug, metaDescription, keyword, wordpressUrl, wpUsername, wpPassword, featuredImageUrl, featuredImageSlug, schemaHtml: schemaHtmlFromBody, longtailKeyphrase: longtailKeyphraseFromBody } = req.body;
+  let { postId, clientId, title, content, slug, metaDescription, keyword, wordpressUrl, wpUsername, wpPassword, featuredImageUrl, featuredImageSlug, schemaHtml: schemaHtmlFromBody, longtailKeyphrase: longtailKeyphraseFromBody, selectedCategoryId } = req.body;
   if (!wordpressUrl || !wpUsername || !wpPassword) return res.status(400).json({ error: "WordPress credentials required" });
   // Safety net: convert markdown to HTML before posting
   content = markdownToHtml(content);
@@ -657,21 +698,32 @@ app.post("/api/publish/wordpress", async (req, res) => {
 
     let categoryId = null;
     try {
-      const catRes = await axios.get(`${wordpressUrl}/wp-json/wp/v2/categories?per_page=100`, { headers: authHeaders, httpsAgent });
-      const categories = catRes.data;
-      if (categories.length > 0) {
-        const keywordLower = keyword.toLowerCase();
-        const industryLower = (req.body.industry || "").toLowerCase();
-        const keywordWords = keywordLower.split(" ");
-        let best = null;
-        best = categories.find(c => keywordWords.some(w => w.length > 3 && c.name.toLowerCase().includes(w)));
-        if (!best) best = categories.find(c => c.name.toLowerCase().includes(industryLower));
-        if (!best) best = categories.find(c => c.slug !== "uncategorized") || categories[0];
-        categoryId = best?.id || null;
-        console.log("✓ Category matched:", best?.name, "ID:", categoryId);
+      if (selectedCategoryId) {
+        // Frontend already picked (or user overrode) — use it directly
+        categoryId = parseInt(selectedCategoryId);
+        console.log("[Category] Using frontend-selected category ID:", categoryId);
+      } else {
+        // Fallback: fetch categories and let Claude pick best match
+        const catRes = await axios.get(`${wordpressUrl}/wp-json/wp/v2/categories?per_page=100`, { headers: authHeaders, httpsAgent });
+        const categories = (catRes.data || []).filter(c => c.slug !== "uncategorized");
+        if (categories.length > 0) {
+          const Anthropic = require("@anthropic-ai/sdk");
+          const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+          const catList = categories.map(c => `ID ${c.id}: "${c.name}"`).join("\n");
+          const resp = await anthropic.messages.create({
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 50,
+            messages: [{ role: "user", content: `Post keyword: "${keyword}", title: "${title}"\nCategories:\n${catList}\nReturn ONLY the numeric ID of the best matching category. Just the number.` }],
+          });
+          const raw = resp.content[0]?.text?.trim() || "0";
+          const bestId = parseInt(raw.match(/\d+/)?.[0] || "0");
+          const valid = categories.find(c => c.id === bestId);
+          categoryId = valid ? bestId : (categories[0]?.id || null);
+          console.log("[Category] Claude picked:", valid?.name || categories[0]?.name, "ID:", categoryId);
+        }
       }
     } catch (catErr) {
-      console.log("Category fetch failed:", catErr.message);
+      console.log("[Category] Selection failed:", catErr.message);
     }
 
     const postData = {
