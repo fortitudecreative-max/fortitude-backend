@@ -802,8 +802,8 @@ app.post("/api/publish/wordpress", async (req, res) => {
         try {
           const r = await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/seo-meta`, {
             post_id: wpPost.id,
-            focuskw: seoFocuskw,
-            metadesc: seoMetadesc,
+            focus_keyword: seoFocuskw,
+            meta_description: seoMetadesc,
             title: seoTitle,
           }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
           if (r.data?.success) {
@@ -2250,8 +2250,13 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
   const writeMeta = async (fields) => {
     if (seoCaps.fortitudePlugin) {
       try {
+        // Plugin expects focus_keyword and meta_description (underscore format)
+        const pluginPayload = { post_id: wpPostId };
+        if (fields.focuskw  !== undefined) pluginPayload.focus_keyword    = fields.focuskw;
+        if (fields.metadesc !== undefined) pluginPayload.meta_description = fields.metadesc;
+        if (fields.title    !== undefined) pluginPayload.title            = fields.title;
         const r = await axios.post(`${wpBaseUrl}/wp-json/fortitude/v1/seo-meta`,
-          { post_id: wpPostId, ...fields }, { headers: authHeaders, httpsAgent });
+          pluginPayload, { headers: authHeaders, httpsAgent });
         if (r.data?.success) return true;
       } catch(e) { log(`Fortitude meta write failed: ${e.message}`); }
     }
