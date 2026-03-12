@@ -1380,9 +1380,16 @@ async function generateResearchKeywords(client, count, excludeSet) {
   const Anthropic = require("@anthropic-ai/sdk");
   const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-  // Parse industry_tags — e.g. "hvac, plumbing" → ["hvac","plumbing"]
-  const tags = (client.industry_tags || client.industry || "")
-    .split(/[,\s]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+  // Parse industry_tags — handles text[] array (from Supabase) or comma string fallback
+  const rawTags = client.industry_tags;
+  let tags = [];
+  if (Array.isArray(rawTags) && rawTags.length > 0) {
+    tags = rawTags.map(t => t.trim().toLowerCase()).filter(Boolean);
+  } else if (typeof rawTags === "string" && rawTags) {
+    tags = rawTags.split(/[,\s]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+  } else if (client.industry) {
+    tags = [client.industry.trim().toLowerCase()];
+  }
 
   let libKeywords = [];
   if (tags.length > 0) {
