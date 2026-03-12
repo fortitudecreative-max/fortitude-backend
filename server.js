@@ -1019,55 +1019,62 @@ app.post("/api/yoast-recalc", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "WordPress credentials not set" });
     }
     const wpBase = client.wordpress_url.replace(/\/$/, "");
-    const authHeaders = {
-      "Authorization": "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64"),
-      "Content-Type": "application/json",
-    };
-    const seoCaps = await detectSeoCapabilities(wpBase, authHeaders);
+    const basicAuth = "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64");
+    const authHeaders = { "Authorization": basicAuth, "Content-Type": "application/json" };
 
-    // Step 1: Fortitude plugin recalc (most direct)
-    let recalcOk = false;
-    if (seoCaps?.fortitudePlugin) {
-      try {
-        const r = await axios.post(`${wpBase}/wp-json/fortitude/v1/yoast-recalc`,
-          { post_id: parseInt(wpPostId) },
-          { headers: authHeaders, httpsAgent, timeout: 10000 });
-        if (r.data?.success || r.status === 200) {
-          recalcOk = true;
-          console.log(`[Recalc] Fortitude recalc OK for post ${wpPostId}`);
-        }
-      } catch(e) { console.log("[Recalc] Fortitude recalc error:", e.message); }
+    // The most reliable way to trigger Yoast scoring is the same thing clicking
+    // "Update" in the WP classic editor does: POST to /wp-admin/post.php with
+    // the full form payload. This fires every save_post hook including Yoast analysis.
+    // Step 1: Get a nonce by loading the edit page
+    console.log(`[Recalc] Fetching edit page for post ${wpPostId} to get nonce...`);
+    const editPageRes = await axios.get(`${wpBase}/wp-admin/post.php?post=${wpPostId}&action=edit`, {
+      headers: { "Authorization": basicAuth },
+      httpsAgent,
+      timeout: 15000,
+      maxRedirects: 5,
+    });
+
+    const editHtml = editPageRes.data;
+    const nonceMatch = editHtml.match(/name="_wpnonce"[^>]*value="([^"]+)"/);
+    const nonce = nonceMatch?.[1];
+    if (!nonce) {
+      // Fallback: just do a REST API content re-post which still fires most hooks
+      console.log("[Recalc] Could not get nonce, falling back to REST content re-post");
+      const fetchRes = await axios.get(`${wpBase}/wp-json/wp/v2/posts/${wpPostId}?context=edit`, { headers: authHeaders, httpsAgent, timeout: 10000 });
+      const postContent = fetchRes.data?.content?.raw || "";
+      await axios.post(`${wpBase}/wp-json/wp/v2/posts/${wpPostId}`,
+        { status: "publish", content: postContent, date: new Date().toISOString() },
+        { headers: authHeaders, httpsAgent, timeout: 20000 });
+      return res.json({ success: true, method: "rest_fallback" });
     }
 
-    // Step 2: Force a real WP update by fetching the post first, then re-sending its content.
-    // A plain { status: "publish" } PUT may be a no-op if WP detects nothing changed.
-    // Re-POSTing the actual content forces wp_update_post hooks to fire, which triggers Yoast.
-    await new Promise(r => setTimeout(r, 500));
-    let postContent = "publish";
-    try {
-      const fetchRes = await axios.get(`${wpBase}/wp-json/wp/v2/posts/${wpPostId}?context=edit`, {
-        headers: authHeaders, httpsAgent, timeout: 10000
-      });
-      postContent = fetchRes.data?.content?.raw || "publish";
-    } catch(e) { console.log("[Recalc] Could not fetch post content, using minimal PUT"); }
+    // Step 2: Extract cookie from the edit page response for session auth
+    const cookies = editPageRes.headers["set-cookie"] || [];
+    const cookieHeader = cookies.map(c => c.split(";")[0]).join("; ");
 
-    await axios.post(`${wpBase}/wp-json/wp/v2/posts/${wpPostId}`,
-      { status: "publish", content: postContent },
-      { headers: authHeaders, httpsAgent, timeout: 20000 });
-    console.log(`[Recalc] Content PUT fired for post ${wpPostId}`);
+    // Step 3: POST to wp-admin/post.php mimicking the Update button click
+    const qs = require("querystring");
+    const formData = qs.stringify({
+      "_wpnonce": nonce,
+      "action": "editpost",
+      "post_ID": wpPostId,
+      "post_status": "publish",
+      "save": "Update",
+    });
 
-    // Step 3: Second Fortitude recalc after PUT to lock in final scores
-    if (seoCaps?.fortitudePlugin) {
-      try {
-        await new Promise(r => setTimeout(r, 800));
-        await axios.post(`${wpBase}/wp-json/fortitude/v1/yoast-recalc`,
-          { post_id: parseInt(wpPostId) },
-          { headers: authHeaders, httpsAgent, timeout: 10000 });
-        console.log(`[Recalc] Second Fortitude recalc OK for post ${wpPostId}`);
-      } catch(e) {}
-    }
+    await axios.post(`${wpBase}/wp-admin/post.php`, formData, {
+      headers: {
+        "Authorization": basicAuth,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Cookie": cookieHeader,
+      },
+      httpsAgent,
+      timeout: 20000,
+      maxRedirects: 5,
+    });
+    console.log(`[Recalc] Classic editor Update fired for post ${wpPostId}`);
 
-    res.json({ success: true, recalcOk });
+    res.json({ success: true, method: "classic_editor_update" });
   } catch (err) {
     console.error("[Recalc] Error:", err.message);
     res.status(500).json({ error: err.message });
