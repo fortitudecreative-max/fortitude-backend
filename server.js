@@ -38,11 +38,16 @@ const requireAuth = async (req, res, next) => {
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
-// ─── WP ADMIN CLASSIC EDITOR UPDATE ──────────────────────────────────────────
-// Logs into wp-login.php with the app password to get a real browser session
-// cookie, then loads the post edit page to get a nonce, then POSTs action=editpost.
-// This is identical to a human opening the post and clicking Update, which fires
-// every save_post hook including Yoast scoring on Free/Premium/Elementor sites.
+app.use(cors({
+  origin: [process.env.FRONTEND_URL || "https://seo.fortitudecreative.com", "http://localhost:3000"],
+  credentials: true,
+}));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Public health check — required by Railway
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+app.get("/api/health", (req, res) => res.json({ status: "ok", ts: Date.now() }));
 
 app.get("/api/keywords/industries", async (req, res) => {
   const { data, error } = await supabase.from("keyword_library").select("industry").order("industry");
