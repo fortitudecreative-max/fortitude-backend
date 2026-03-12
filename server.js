@@ -240,6 +240,63 @@ app.get("/api/images/client/:client_id", async (req, res) => {
   res.json({ images: data });
 });
 
+app.post("/api/images/upload-bulk", upload.array("images", 50), requireAuth, async (req, res) => {
+  const { industry } = req.body;
+  const files = req.files;
+  if (!files || files.length === 0) return res.status(400).json({ error: "No files uploaded" });
+
+  const results = [];
+  const errors = [];
+
+  for (const file of files) {
+    try {
+      const folder = `staging/${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
+      const ext = file.originalname.split(".").pop();
+      const storagePath = `${folder}/${file.originalname}`;
+      const { error: uploadError } = await supabase.storage
+        .from("image-library")
+        .upload(storagePath, file.buffer, { contentType: file.mimetype });
+      if (uploadError) { errors.push({ filename: file.originalname, error: uploadError.message }); continue; }
+      const { data: urlData } = supabase.storage.from("image-library").getPublicUrl(storagePath);
+      const insertData = { filename: file.originalname, industry: industry || null, category: "", storage_path: urlData.publicUrl };
+      const { data, error } = await supabase.from("image_library").insert([insertData]).select();
+      if (error) { errors.push({ filename: file.originalname, error: error.message }); continue; }
+      results.push(data[0]);
+    } catch (e) {
+      errors.push({ filename: file.originalname, error: e.message });
+    }
+  }
+  res.json({ uploaded: results, errors });
+});
+
+app.post("/api/images/assign-clients", requireAuth, async (req, res) => {
+  const { imageIds, clientIds } = req.body;
+  if (!imageIds?.length || !clientIds?.length) return res.status(400).json({ error: "imageIds and clientIds required" });
+
+  const { data: sourceImages } = await supabase.from("image_library").select("*").in("id", imageIds);
+  if (!sourceImages?.length) return res.status(404).json({ error: "Images not found" });
+
+  const inserted = [];
+  for (const img of sourceImages) {
+    for (const clientId of clientIds) {
+      // Skip if already assigned
+      const { data: existing } = await supabase.from("image_library")
+        .select("id").eq("client_id", clientId).eq("storage_path", img.storage_path).maybeSingle();
+      if (existing) continue;
+      const { data, error } = await supabase.from("image_library").insert([{
+        filename: img.filename,
+        industry: img.industry,
+        category: img.category,
+        description: img.description,
+        storage_path: img.storage_path,
+        client_id: clientId,
+      }]).select();
+      if (!error && data?.[0]) inserted.push(data[0]);
+    }
+  }
+  res.json({ assigned: inserted.length, rows: inserted });
+});
+
 app.post("/api/images/upload", upload.single("image"), async (req, res) => {
   const { industry, category, client_id } = req.body;
   const file = req.file;
