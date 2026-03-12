@@ -1002,16 +1002,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
 
     // ── Final Yoast recalc — classic editor Update via WP session login ─────────
     // Logs into wp-login.php to get a real session cookie, then loads the post
-    // edit page to grab the nonce, then POSTs action=editpost (same as clicking
-    // Update in wp-admin). This is what turns the Yoast dots green reliably.
-    if (wpPost?.id && wordpressUrl) {
-      try {
-        await new Promise(r => setTimeout(r, 2000));
-        await wpAdminUpdate(wordpressUrl, wpUsername, wpPassword, wpPost.id);
-      } catch(e) {
-        console.log("[Recalc] Classic Update error:", e.message);
-      }
-    }
+
 
     // ── Auto-post to Google Business Profile ──────────────────────────────
     let gbpResult = null;
@@ -1086,22 +1077,10 @@ app.post("/api/publish/wordpress", async (req, res) => {
 // Accepts { clientId, wpPostId }
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/api/yoast-recalc", requireAuth, async (req, res) => {
-  const { clientId, wpPostId } = req.body;
-  if (!clientId || !wpPostId) return res.status(400).json({ error: "clientId and wpPostId required" });
-  try {
-    const { data: client } = await supabase.from("clients").select("*").eq("id", clientId).single();
-    if (!client?.wordpress_url || !client?.wordpress_username || !client?.wordpress_password) {
-      return res.status(400).json({ error: "WordPress credentials not set" });
-    }
-    const wpBase = client.wordpress_url.replace(/\/$/, "");
-    await wpAdminUpdate(wpBase, client.wordpress_username, client.wordpress_password, wpPostId);
-    console.log(`[Recalc] Classic editor Update fired for post ${wpPostId}`);
-    res.json({ success: true, method: "classic_update" });
-
-  } catch (err) {
-    console.error("[Recalc] Error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+  // wpAdminUpdate removed - session cookie auth via Basic Auth is not supported by WP.
+  // Yoast scores are set correctly at publish time via the Fortitude plugin + REST meta.
+  // The yoast-check endpoint reads scores directly and is the source of truth.
+  res.json({ success: true, method: "noop" });
 });
 
 // ─── MANUAL YOAST OPTIMIZE ENDPOINT ──────────────────────────────────────────
