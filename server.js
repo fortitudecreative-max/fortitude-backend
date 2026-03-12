@@ -1131,48 +1131,44 @@ app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "WordPress credentials not set" });
     }
     const wpBase = client.wordpress_url.replace(/\/$/, "");
-    const authHeaders = {
-      "Authorization": "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64"),
-      "Content-Type": "application/json",
-    };
-    const seoCaps = await detectSeoCapabilities(wpBase, authHeaders);
+    const basicAuth = "Basic " + Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64");
 
-    // Primary method: ask Fortitude plugin for actual stored Yoast scores
-    if (seoCaps?.fortitudePlugin) {
-      try {
-        const r = await axios.post(`${wpBase}/wp-json/fortitude/v1/yoast-recalc`,
-          { post_id: parseInt(postId) },
-          { headers: authHeaders, httpsAgent, timeout: 15000 });
-        const scores = r.data?.scores_after || {};
-        const seo = parseInt(scores.primary_focus_keyword_score ?? 0);
-        const read = parseInt(scores.readability_score ?? 0);
-        const hasFocusKw = scores.has_focus_keyword === true || scores.has_focus_keyword === "1";
-        const hasTitle = scores.has_title === true || scores.has_title === "1";
-        const hasMetaDesc = scores.has_metadesc === true || scores.has_metadesc === "1";
+    // Read the actual Yoast score dot from the WP admin posts list HTML.
+    // This is the exact same source of truth as what you see in WordPress.
+    // class="wpseo-score-icon good" = green, "ok" = orange, "bad"/"na" = not green.
+    const editPageRes = await axios.get(
+      `${wpBase}/wp-admin/edit.php?post_type=post`,
+      { headers: { "Authorization": basicAuth }, httpsAgent, timeout: 15000, maxRedirects: 5 }
+    );
+    const html = editPageRes.data;
 
-        // Yoast: >= 75 = green, >= 50 = orange. We treat >= 50 as passing.
-        // If no focus keyword, SEO score is meaningless - only require readability.
-        const seoOk = !hasFocusKw || seo >= 50;
-        const readOk = read >= 50;
-        const green = seoOk && readOk;
-
-        console.log(`[YoastCheck] Post ${postId}: seo=${seo} read=${read} hasFocusKw=${hasFocusKw} hasTitle=${hasTitle} hasMetaDesc=${hasMetaDesc} green=${green}`);
-        return res.json({ green, seo_score: seo, readability_score: read, has_focus_keyword: hasFocusKw, source: "fortitude_plugin" });
-      } catch(e) {
-        console.log("[YoastCheck] Plugin check failed:", e.message);
-      }
+    // Find the row for this specific post ID and read its Yoast score class
+    const rowMatch = html.match(new RegExp(`id="post-${postId}"[\s\S]{0,3000}?column-wpseo-score[\s\S]{0,500}?wpseo-score-icon ([\w-]+)`));
+    if (rowMatch) {
+      const scoreClass = rowMatch[1]; // "good", "ok", "bad", "na", "noindex"
+      const green = scoreClass === "good" || scoreClass === "ok";
+      console.log(`[YoastCheck] Post ${postId}: score class="${scoreClass}" green=${green} (source: wp-admin posts list)`);
+      return res.json({ green, score_class: scoreClass, source: "wp_admin_posts_list" });
     }
 
-    // Fallback: check yoast_head_json for presence of title + description as proxy for good setup
-    const postRes = await axios.get(`${wpBase}/wp-json/wp/v2/posts/${postId}?context=edit`, {
-      headers: authHeaders, httpsAgent
-    });
-    const post = postRes.data;
-    const hasTitle = !!(post?.yoast_head_json?.title);
-    const hasDesc = !!(post?.yoast_head_json?.description);
-    const focuskw = post?.meta?._yoast_wpseo_focuskw || "";
-    const green = hasTitle && hasDesc && focuskw.length > 0;
-    return res.json({ green, source: "fallback", hasTitle, hasDesc, hasFocusKw: focuskw.length > 0 });
+    // Post not found on page 1 - try fetching the specific post edit page and reading score from there
+    const singleRes = await axios.get(
+      `${wpBase}/wp-admin/post.php?post=${postId}&action=edit`,
+      { headers: { "Authorization": basicAuth }, httpsAgent, timeout: 15000, maxRedirects: 5 }
+    );
+    const singleHtml = singleRes.data;
+    const singleMatch = singleHtml.match(/wpseo-score-icon ([\w-]+)/);
+    if (singleMatch) {
+      const scoreClass = singleMatch[1];
+      const green = scoreClass === "good" || scoreClass === "ok";
+      console.log(`[YoastCheck] Post ${postId}: score class="${scoreClass}" green=${green} (source: wp-admin edit page)`);
+      return res.json({ green, score_class: scoreClass, source: "wp_admin_edit_page" });
+    }
+
+    // No Yoast score found at all - Yoast may not be installed or post has no score yet
+    console.log(`[YoastCheck] Post ${postId}: no Yoast score found`);
+    return res.json({ green: false, score_class: "na", source: "not_found" });
+
   } catch (err) {
     console.error("[YoastCheck] Error:", err.message);
     res.status(500).json({ error: err.message });
