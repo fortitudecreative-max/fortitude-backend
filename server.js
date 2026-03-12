@@ -222,12 +222,16 @@ app.delete("/api/keywords/used-client/:id", async (req, res) => {
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.get("/api/images", async (req, res) => {
-  const { industry, category, client_id } = req.query;
+  const { industry, category, client_id, all } = req.query;
   let query = supabase.from("image_library").select("*").order("created_at", { ascending: false });
   if (industry) query = query.eq("industry", industry);
   if (category) query = query.eq("category", category);
-  if (client_id) query = query.eq("client_id", client_id);
-  // No client_id filter - image library shows all images regardless of client assignment
+  if (client_id) {
+    query = query.eq("client_id", client_id);
+  } else if (all !== "true") {
+    // Image Library only shows library images (no client_id). Pass ?all=true to include client images.
+    query = query.is("client_id", null);
+  }
   const { data, error } = await query;
   if (error) return res.status(500).json({ error: error.message });
   res.json({ images: data });
