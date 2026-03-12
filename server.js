@@ -38,6 +38,68 @@ const requireAuth = async (req, res, next) => {
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
+// ─── WP ADMIN CLASSIC EDITOR UPDATE ──────────────────────────────────────────
+// Logs into wp-login.php with the app password to get a real browser session
+// cookie, then loads the post edit page to get a nonce, then POSTs action=editpost.
+// This is identical to a human opening the post and clicking Update, which fires
+// every save_post hook including Yoast scoring on Free/Premium/Elementor sites.
+const wpAdminUpdate = async (wpBase, wpUser, wpPass, postId) => {
+  wpBase = wpBase.replace(/\/$/, "");
+
+  // Step 1: Log in via wp-login.php to get a session cookie
+  const loginForm = new URLSearchParams({
+    log: wpUser,
+    pwd: wpPass,
+    "wp-submit": "Log+In",
+    redirect_to: `/wp-admin/`,
+    testcookie: "1",
+  });
+  const loginRes = await axios.post(`${wpBase}/wp-login.php`, loginForm.toString(), {
+    headers: { "Content-Type": "application/x-www-form-urlencoded", "Cookie": "wordpress_test_cookie=WP+Cookie+check" },
+    httpsAgent,
+    maxRedirects: 0,
+    validateStatus: s => s < 400,
+    timeout: 15000,
+  });
+
+  // Extract all Set-Cookie headers and build a cookie string
+  const setCookies = loginRes.headers["set-cookie"] || [];
+  const cookieStr = setCookies.map(c => c.split(";")[0]).join("; ");
+  if (!cookieStr || (!cookieStr.includes("wordpress_logged_in") && !cookieStr.includes("wordpress_sec"))) {
+    console.log("[WPUpdate] Login did not return session cookie — skipping Update");
+    return;
+  }
+
+  // Step 2: Load the edit page with the session cookie to get the nonce
+  const editRes = await axios.get(`${wpBase}/wp-admin/post.php?post=${postId}&action=edit`, {
+    headers: { "Cookie": cookieStr },
+    httpsAgent,
+    timeout: 15000,
+    maxRedirects: 5,
+  });
+  const nonce = editRes.data.match(/name="_wpnonce"[^>]*value="([^"]+)"/)?.[1];
+  if (!nonce) {
+    console.log(`[WPUpdate] No nonce found for post ${postId} — skipping Update`);
+    return;
+  }
+
+  // Step 3: POST action=editpost — same as clicking Update in the editor
+  const updateForm = new URLSearchParams({
+    _wpnonce: nonce,
+    action: "editpost",
+    post_ID: String(postId),
+    post_status: "publish",
+    save: "Update",
+  });
+  await axios.post(`${wpBase}/wp-admin/post.php`, updateForm.toString(), {
+    headers: { "Content-Type": "application/x-www-form-urlencoded", "Cookie": cookieStr },
+    httpsAgent,
+    timeout: 15000,
+    maxRedirects: 5,
+  });
+  console.log(`[WPUpdate] ✓ Classic editor Update fired for post ${postId} — Yoast dots will be green`);
+};
+
 // ─── YOAST / SEO PLUGIN DETECTION ────────────────────────────────────────────
 // Returns { yoast: "premium"|"free"|"none", fortitudePlugin: true|false, canWriteSeoMeta: true|false,
 //           restMetaKeys: true|false, indexablesApi: true|false }
@@ -898,31 +960,14 @@ app.post("/api/publish/wordpress", async (req, res) => {
       }
     }
 
-    // ── Final Yoast recalc — classic editor Update ────────────────────────────
-    // Simulates clicking the Update button in wp-admin, which fires every save_post
-    // hook including Yoast scoring. Works on all sites (Free/Premium/Elementor).
+    // ── Final Yoast recalc — classic editor Update via WP session login ─────────
+    // Logs into wp-login.php to get a real session cookie, then loads the post
+    // edit page to grab the nonce, then POSTs action=editpost (same as clicking
+    // Update in wp-admin). This is what turns the Yoast dots green reliably.
     if (wpPost?.id && wordpressUrl) {
       try {
         await new Promise(r => setTimeout(r, 2000));
-        const basicCreds = Buffer.from(`${wpUsername}:${wpPassword}`).toString("base64");
-        const editPageRes = await axios.get(
-          `${wordpressUrl}/wp-admin/post.php?post=${wpPost.id}&action=edit`,
-          { headers: { "Authorization": `Basic ${basicCreds}` }, httpsAgent, timeout: 15000, maxRedirects: 5 }
-        );
-        const nonce = editPageRes.data.match(/name="_wpnonce"[^>]*value="([^"]+)"/)?.[1];
-        if (nonce) {
-          const form = new URLSearchParams({
-            _wpnonce: nonce, action: "editpost", post_ID: String(wpPost.id),
-            post_status: "publish", save: "Update"
-          });
-          await axios.post(`${wordpressUrl}/wp-admin/post.php`, form.toString(), {
-            headers: { "Authorization": `Basic ${basicCreds}`, "Content-Type": "application/x-www-form-urlencoded" },
-            httpsAgent, timeout: 15000, maxRedirects: 5
-          });
-          console.log("[Recalc] ✓ Classic editor Update fired — Yoast dots will be green");
-        } else {
-          console.log("[Recalc] Could not get nonce, skipping classic Update");
-        }
+        await wpAdminUpdate(wordpressUrl, wpUsername, wpPassword, wpPost.id);
       } catch(e) {
         console.log("[Recalc] Classic Update error:", e.message);
       }
@@ -1009,29 +1054,7 @@ app.post("/api/yoast-recalc", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "WordPress credentials not set" });
     }
     const wpBase = client.wordpress_url.replace(/\/$/, "");
-    const basicCreds = Buffer.from(`${client.wordpress_username}:${client.wordpress_password}`).toString("base64");
-    const basicAuth = "Basic " + basicCreds;
-
-    // Classic editor Update - fetch nonce then POST action=editpost.
-    // Identical to clicking Update in wp-admin. Fires every save_post hook
-    // including Yoast scoring. Works on Free/Premium/Elementor sites.
-    const editPageRes = await axios.get(
-      `${wpBase}/wp-admin/post.php?post=${wpPostId}&action=edit`,
-      { headers: { "Authorization": basicAuth }, httpsAgent, timeout: 15000, maxRedirects: 5 }
-    );
-    const nonce = editPageRes.data.match(/name="_wpnonce"[^>]*value="([^"]+)"/)?.[1];
-    if (!nonce) {
-      console.log(`[Recalc] No nonce found for post ${wpPostId}`);
-      return res.json({ success: false, method: "classic_update", error: "nonce not found" });
-    }
-    const form = new URLSearchParams({
-      _wpnonce: nonce, action: "editpost", post_ID: String(wpPostId),
-      post_status: "publish", save: "Update"
-    });
-    await axios.post(`${wpBase}/wp-admin/post.php`, form.toString(), {
-      headers: { "Authorization": basicAuth, "Content-Type": "application/x-www-form-urlencoded" },
-      httpsAgent, timeout: 15000, maxRedirects: 5
-    });
+    await wpAdminUpdate(wpBase, client.wordpress_username, client.wordpress_password, wpPostId);
     console.log(`[Recalc] Classic editor Update fired for post ${wpPostId}`);
     res.json({ success: true, method: "classic_update" });
 
