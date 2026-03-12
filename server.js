@@ -437,10 +437,11 @@ app.post("/api/clients/:id/logo", upload.single("logo"), async (req, res) => {
 
 app.put("/api/images/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
-  const { description, category } = req.body;
+  const { description, category, industry } = req.body;
   const updates = {};
   if (description !== undefined) updates.description = description;
   if (category !== undefined) updates.category = category;
+  if (industry !== undefined) updates.industry = industry;
   const { data, error } = await supabase.from("image_library").update(updates).eq("id", id).select();
   if (error) return res.status(500).json({ error: error.message });
   res.json({ image: data[0] });
