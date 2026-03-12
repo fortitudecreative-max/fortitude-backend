@@ -350,7 +350,7 @@ app.post("/api/clients/:id/detect-seo-caps", requireAuth, async (req, res) => {
     const { data: client } = await supabase.from("clients")
       .select("wordpress_url,wordpress_username,wordpress_password").eq("id", id).single();
     if (!client?.wordpress_url) return res.status(400).json({ error: "WordPress URL required" });
-    const wpPass = client.wordpress_password ? decrypt_field(client.wordpress_password) : "";
+    const wpPass = client.wordpress_password || "";
     const authHeaders = { "Authorization": "Basic " + Buffer.from(`${client.wordpress_username}:${wpPass}`).toString("base64") };
     const caps = await detectSeoCapabilities(client.wordpress_url, authHeaders, id);
     return res.json({ success: true, caps });
