@@ -378,6 +378,17 @@ app.post("/api/clients/:id/logo", upload.single("logo"), async (req, res) => {
   }
 });
 
+app.put("/api/images/:id", requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const { description, category } = req.body;
+  const updates = {};
+  if (description !== undefined) updates.description = description;
+  if (category !== undefined) updates.category = category;
+  const { data, error } = await supabase.from("image_library").update(updates).eq("id", id).select();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ image: data[0] });
+});
+
 app.delete("/api/images/:id", async (req, res) => {
   const { id } = req.params;
   try {
@@ -1813,10 +1824,11 @@ function selectFeaturedImage(images, keywordWords = []) {
   // Use available pool; fall back to least-recently-used if all on cooldown
   const pool = available.length > 0 ? available : images;
 
-  // Within the pool, try keyword/category match first
-  const match = pool.find(img =>
-    keywordWords.some(w => w.length > 3 && (img.category || "").toLowerCase().includes(w))
-  );
+  // Within the pool, try keyword match against category + description
+  const match = pool.find(img => {
+    const searchText = ((img.category || "") + " " + (img.description || "")).toLowerCase();
+    return keywordWords.some(w => w.length > 3 && searchText.includes(w));
+  });
 
   // Otherwise pick least-used, then oldest last_used_at
   const sorted = [...pool].sort((a, b) => {
