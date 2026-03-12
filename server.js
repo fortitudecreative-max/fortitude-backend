@@ -1147,15 +1147,7 @@ app.get("/api/yoast-check/:clientId/:postId", requireAuth, async (req, res) => {
         // If no focus keyword, SEO score is meaningless - only require readability.
         const seoOk = !hasFocusKw || seo >= 50;
         const readOk = read >= 50;
-        let green = seoOk && readOk;
-
-        // Elementor / page-builder sites: Yoast can't analyze content stored in _elementor_data,
-        // so scores stay 0 even when everything is correctly set. In this case if the post has
-        // focus keyword + title + meta description all set, treat it as passing.
-        if (!green && seo === 0 && read === 0 && hasFocusKw && hasTitle && hasMetaDesc) {
-          green = true;
-          console.log(`[YoastCheck] Post ${postId}: scores=0 but meta fully set (likely Elementor) - treating as green`);
-        }
+        const green = seoOk && readOk;
 
         console.log(`[YoastCheck] Post ${postId}: seo=${seo} read=${read} hasFocusKw=${hasFocusKw} hasTitle=${hasTitle} hasMetaDesc=${hasMetaDesc} green=${green}`);
         return res.json({ green, seo_score: seo, readability_score: read, has_focus_keyword: hasFocusKw, source: "fortitude_plugin" });
