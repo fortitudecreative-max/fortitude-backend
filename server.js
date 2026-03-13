@@ -738,6 +738,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
     let longtailKeyphrase = longtailKeyphraseFromBody || null;
 
     let featuredMediaId = null;
+    let imageUploadError = null;
     if (featuredImageUrl) {
       try {
         const imageRes = await axios.get(featuredImageUrl, { responseType: "arraybuffer", httpsAgent });
@@ -766,7 +767,8 @@ app.post("/api/publish/wordpress", async (req, res) => {
         // Track image usage — enforces 10-post cooldown before reuse
         if (req.body.featuredImageId) await markImageUsed(req.body.featuredImageId);
       } catch (imgErr) {
-        console.error("Image upload failed:", imgErr.response?.data || imgErr.message);
+        imageUploadError = imgErr.response?.data?.message || imgErr.response?.data?.code || imgErr.message;
+        console.error("[ImgUpload] Failed:", imageUploadError);
       }
     }
 
@@ -975,7 +977,7 @@ app.post("/api/publish/wordpress", async (req, res) => {
     }
 
     // ── Respond immediately — post is live ────────────────────────────────
-    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta });
+    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, imageUploadError, status: wpPost.status, featuredMediaId, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta });
 
     // ── Background work — runs after response is sent ─────────────────────
     setImmediate(async () => {
