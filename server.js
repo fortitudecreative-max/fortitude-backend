@@ -971,6 +971,52 @@ app.post("/api/publish/wordpress", async (req, res) => {
       }
     }
 
+    // ── Compute real Yoast scores via yoastseo npm + write to indexable ───
+    // After the optimize loop has finalized the content, fetch the post HTML,
+    // run Yoast's own analysis engine, and write the real scores to the DB.
+    // This is what turns the grey dots in edit.php to green/orange/red.
+    if (seoCaps.fortitudePlugin) {
+      try {
+        // Fetch final post content after all edits
+        const finalPostResp = await axios.get(
+          `${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}?context=edit`,
+          { headers: authHeaders, httpsAgent, timeout: 15000 }
+        );
+        const finalHtml = finalPostResp.data?.content?.raw || finalPostResp.data?.content?.rendered || "";
+        const finalSlug = finalPostResp.data?.slug || "";
+
+        // Run the real Yoast analysis using their npm library
+        const yoastScores = calculateYoastScores(finalHtml, {
+          keyword,
+          title: yoastOptResult?.title || title,
+          metaDescription: yoastOptResult?.metaDescription || metaDescription,
+          slug: finalSlug,
+        });
+
+        if (yoastScores) {
+          // Call plugin with the computed scores so it writes them to wpseo_indexable
+          const recalcResp = await axios.post(
+            `${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
+            {
+              post_id: wpPost.id,
+              seo_score: yoastScores.seoScore,
+              readability_score: yoastScores.readScore,
+              inclusive_language_score: -1, // not calculable server-side without Premium
+            },
+            { headers: authHeaders, httpsAgent, timeout: 20000 }
+          );
+          console.log(`[YoastScore] Recalc done — methods: ${recalcResp.data?.methods?.join(", ")}`);
+          if (yoastOptResult) {
+            yoastOptResult.yoastScores = yoastScores;
+          } else {
+            yoastOptResult = { yoastScores };
+          }
+        }
+      } catch(e) {
+        console.log("[YoastScore] Score write failed (non-fatal):", e.message);
+      }
+    }
+
     // ── Post-publish QA + auto-repair loop ────────────────────────────────
     let qa = null;
     let repairHistory = [];
@@ -1101,6 +1147,35 @@ app.post("/api/yoast-optimize", async (req, res) => {
       authHeaders,
       seoCaps
     );
+
+    // Compute and write real Yoast scores after the optimize loop
+    if (seoCaps.fortitudePlugin) {
+      try {
+        const finalPostResp = await axios.get(
+          `${wordpressUrl}/wp-json/wp/v2/posts/${wpPostId}?context=edit`,
+          { headers: authHeaders, httpsAgent, timeout: 15000 }
+        );
+        const finalHtml = finalPostResp.data?.content?.raw || finalPostResp.data?.content?.rendered || "";
+        const finalSlug = finalPostResp.data?.slug || "";
+        const yoastScores = calculateYoastScores(finalHtml, {
+          keyword,
+          title: title || "",
+          metaDescription: metaDescription || "",
+          slug: finalSlug,
+        });
+        if (yoastScores) {
+          await axios.post(`${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`, {
+            post_id: parseInt(wpPostId),
+            seo_score: yoastScores.seoScore,
+            readability_score: yoastScores.readScore,
+            inclusive_language_score: -1,
+          }, { headers: authHeaders, httpsAgent, timeout: 20000 });
+          result.yoastScores = yoastScores;
+        }
+      } catch(e) {
+        console.log("[YoastOpt/Manual] Score write failed (non-fatal):", e.message);
+      }
+    }
 
     res.json({ success: true, ...result });
   } catch (err) {
@@ -2282,6 +2357,50 @@ const MAX_REPAIR_CYCLES = 3;
 // ─────────────────────────────────────────────────────────────────────────────
 const YOAST_MAX_PASSES = 5;
 
+// ── Run Yoast's own analysis library (yoastseo npm) to compute real scores ───
+// This is the same JS engine Yoast runs in the browser. We run it server-side
+// so we get real scores without needing a browser, then write them to the DB.
+// Green threshold: >= 71. Orange: >= 41. Red: < 41. Grey: not set.
+const calculateYoastScores = (htmlContent, { keyword, title, metaDescription, slug }) => {
+  try {
+    const { Paper, SeoAssessor, ContentAssessor } = require("yoastseo");
+    const EnglishResearcher = require("yoastseo/build/languageProcessing/languages/en/Researcher.js");
+
+    const paper = new Paper(htmlContent, {
+      keyword: keyword || "",
+      title: title ? title.replace(/ - %%sitename%%/, "").replace(/ \| .+$/, "") : "",
+      description: metaDescription || "",
+      slug: slug || "",
+      locale: "en_US",
+    });
+
+    const researcher = new EnglishResearcher.default(paper);
+    const seoAssessor = new SeoAssessor(researcher);
+    const contentAssessor = new ContentAssessor(researcher);
+
+    seoAssessor.assess(paper);
+    contentAssessor.assess(paper);
+
+    const seoScore    = seoAssessor.calculateOverallScore();
+    const readScore   = contentAssessor.calculateOverallScore();
+
+    const toColor = (s) => s >= 71 ? "green" : s >= 41 ? "orange" : "red";
+
+    console.log(`[YoastScore] SEO=${seoScore}(${toColor(seoScore)}) Readability=${readScore}(${toColor(readScore)})`);
+
+    // Log individual checks for visibility
+    const seoResults = seoAssessor.getValidResults();
+    seoResults.forEach(r => {
+      if (r.score < 6) console.log(`[YoastScore]   SEO issue: ${r.getIdentifier()} score=${r.score}`);
+    });
+
+    return { seoScore, readScore, seoColor: toColor(seoScore), readColor: toColor(readScore) };
+  } catch (e) {
+    console.log("[YoastScore] Analysis failed:", e.message);
+    return null;
+  }
+};
+
 const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription }, wpBaseUrl, authHeaders, seoCaps) => {
   const Anthropic = require("@anthropic-ai/sdk");
   const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -2812,21 +2931,33 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
         meta: { "astra-migrate-meta-layouts": "set" }
       }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent }).catch(() => {});
 
-      // Score recalc: Fortitude → Premium indexables → no-op update
-      let schRecalcOk = false;
+      // Score recalc: compute real Yoast scores via npm, write to indexable table
       if (schSeoCaps.fortitudePlugin) {
         try {
+          const schFinalPost = await axios.get(
+            `${client.wordpress_url}/wp-json/wp/v2/posts/${wpRes.data.id}?context=edit`,
+            { headers: authHeaders, httpsAgent, timeout: 15000 }
+          );
+          const schFinalHtml = schFinalPost.data?.content?.raw || schFinalPost.data?.content?.rendered || "";
+          const schFinalSlug = schFinalPost.data?.slug || "";
+          const schYoastScores = calculateYoastScores(schFinalHtml, {
+            keyword: schLongtailKw,
+            title: `${post.title} - %%sitename%%`,
+            metaDescription: schSafeMetaDesc,
+            slug: schFinalSlug,
+          });
+          const recalcPayload = { post_id: wpRes.data.id };
+          if (schYoastScores) {
+            recalcPayload.seo_score = schYoastScores.seoScore;
+            recalcPayload.readability_score = schYoastScores.readScore;
+            recalcPayload.inclusive_language_score = -1;
+          }
           const r = await axios.post(`${client.wordpress_url}/wp-json/fortitude/v1/yoast-recalc`,
-            { post_id: wpRes.data.id }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-          if (r.data?.success || r.status === 200) { schRecalcOk = true; console.log("[Scheduler SEO] ✓ Fortitude yoast-recalc"); }
-        } catch(e) {}
-      }
-      if (!schRecalcOk && schSeoCaps.indexablesApi) {
-        try {
-          await axios.post(`${client.wordpress_url}/wp-json/yoast/v3/indexing/posts`,
-            { post_id: wpRes.data.id }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
-          schRecalcOk = true; console.log("[Scheduler SEO] ✓ Premium indexables recalc");
-        } catch(e) {}
+            recalcPayload, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
+          if (r.data?.success || r.status === 200) {
+            console.log(`[Scheduler SEO] ✓ yoast-recalc with real scores — SEO=${schYoastScores?.seoScore} Read=${schYoastScores?.readScore}`);
+          }
+        } catch(e) { console.log("[Scheduler SEO] yoast-recalc failed:", e.message); }
       }
       if (!schRecalcOk) {
         try {
