@@ -955,136 +955,9 @@ app.post("/api/publish/wordpress", async (req, res) => {
       await supabase.from("clients").update({ posts_published: (client?.posts_published || 0) + 1 }).eq("id", clientId);
     }
 
-    // ── Yoast optimization loop (density, title, H2s, meta length) ───────────
-    let yoastOptResult = null;
-    if (wpPost.link && seoCaps.canWriteSeoMeta) {
-      try {
-        yoastOptResult = await runYoastOptimizeLoop(
-          wpPost.id,
-          { title, keyword, metaDescription: metaDescription },
-          wordpressUrl,
-          { ...authHeaders, "Content-Type": "application/json" },
-          seoCaps
-        );
-      } catch(e) {
-        console.error("[YoastOpt] Loop threw:", e.message);
-      }
-    }
-
-    // ── Compute real Yoast scores via yoastseo npm + write to indexable ───
-    // After the optimize loop has finalized the content, fetch the post HTML,
-    // run Yoast's own analysis engine, and write the real scores to the DB.
-    // This is what turns the grey dots in edit.php to green/orange/red.
-    if (seoCaps.fortitudePlugin) {
-      try {
-        // Fetch final post content after all edits
-        const finalPostResp = await axios.get(
-          `${wordpressUrl}/wp-json/wp/v2/posts/${wpPost.id}?context=edit`,
-          { headers: authHeaders, httpsAgent, timeout: 15000 }
-        );
-        const finalHtml = finalPostResp.data?.content?.raw || finalPostResp.data?.content?.rendered || "";
-        const finalSlug = finalPostResp.data?.slug || "";
-
-        // Run the real Yoast analysis using their npm library
-        const yoastScores = calculateYoastScores(finalHtml, {
-          keyword,
-          title: yoastOptResult?.title || title,
-          metaDescription: yoastOptResult?.metaDescription || metaDescription,
-          slug: finalSlug,
-        });
-
-        if (yoastScores) {
-          // Call plugin with the computed scores so it writes them to wpseo_indexable
-          const recalcResp = await axios.post(
-            `${wordpressUrl}/wp-json/fortitude/v1/yoast-recalc`,
-            {
-              post_id: wpPost.id,
-              seo_score: yoastScores.seoScore,
-              readability_score: yoastScores.readScore,
-              inclusive_language_score: -1, // not calculable server-side without Premium
-            },
-            { headers: authHeaders, httpsAgent, timeout: 20000 }
-          );
-          console.log(`[YoastScore] Recalc done — methods: ${recalcResp.data?.methods?.join(", ")}`);
-          if (yoastOptResult) {
-            yoastOptResult.yoastScores = yoastScores;
-          } else {
-            yoastOptResult = { yoastScores };
-          }
-        }
-      } catch(e) {
-        console.log("[YoastScore] Score write failed (non-fatal):", e.message);
-      }
-    }
-
-    // ── Post-publish QA + auto-repair loop ────────────────────────────────
-    let qa = null;
-    let repairHistory = [];
-    if (wpPost.link) {
-      try {
-        const result = await qaRepairLoop(
-          wpPost.id, wpPost.link,
-          { title, keyword, metaDescription },
-          wordpressUrl,
-          { ...authHeaders, "Content-Type": "application/json" }
-        );
-        qa = result.qa;
-        repairHistory = result.history;
-      } catch(e) {
-        console.error("[QA] Repair loop threw:", e.message);
-        qa = { passed: false, score: 0, issues: [{ type: "qa_error", severity: "error", message: e.message }], warnings: [], liveUrl: wpPost.link };
-      }
-    }
-
-    // ── Final Yoast recalc — classic editor Update via WP session login ─────────
-    // Logs into wp-login.php to get a real session cookie, then loads the post
-
-
-    // ── Auto-post to Google Business Profile ──────────────────────────────
-    let gbpResult = null;
-    if (clientId && wpPost.link && agencyGbpToken.refresh_token) {
-      try {
-        const { data: clientData } = await supabase.from("clients").select("gbp_location_name").eq("id", clientId).single();
-        if (clientData?.gbp_location_name) {
-          const access_token = await getAgencyAccessToken();
-          const gbpSummary = metaDescription || `${title} — read our latest post for expert tips and advice.`;
-          const gbpBody = {
-            languageCode: "en",
-            summary: gbpSummary,
-            topicType: "STANDARD",
-            callToAction: { actionType: "LEARN_MORE", url: wpPost.link },
-            ...(featuredImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: featuredImageUrl }] } : {}),
-          };
-          const gbpRes = await axios.post(
-            `https://mybusiness.googleapis.com/v4/${clientData.gbp_location_name}/localPosts`,
-            gbpBody,
-            { headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" } }
-          );
-          gbpResult = { success: true, post: gbpRes.data };
-          console.log("✓ GBP post auto-published for client", clientId);
-        }
-      } catch (gbpErr) {
-        console.error("GBP auto-post error:", gbpErr.response?.data || gbpErr.message);
-        gbpResult = { success: false, error: gbpErr.response?.data?.error?.message || gbpErr.message };
-      }
-    }
-
-    // Auto-add keyword to client's used keywords list and remove from queues
+    // Insert scheduled_jobs row immediately so Archived Posts shows the post
     if (clientId && keyword) {
       try {
-        // Add to used keywords (upsert)
-        const { data: existingUsed } = await supabase.from("client_used_keywords")
-          .select("id").eq("client_id", clientId).eq("keyword", keyword.trim()).single();
-        if (!existingUsed) {
-          await supabase.from("client_used_keywords")
-            .insert([{ client_id: clientId, keyword: keyword.trim(), added_at: new Date().toISOString() }]);
-        }
-        // Remove from monthly keyword queue
-        await supabase.from("client_keyword_queue")
-          .delete().eq("client_id", clientId).ilike("keyword", keyword.trim());
-
-        // Insert a published row into scheduled_jobs so it appears in Archived Posts
-        // (manual publishes don't have a pre-existing scheduled_jobs row)
         const existingJob = await supabase.from("scheduled_jobs")
           .select("id").eq("client_id", clientId).eq("wp_post_id", wpPost.id).single();
         if (!existingJob.data) {
@@ -1098,9 +971,66 @@ app.post("/api/publish/wordpress", async (req, res) => {
             published_url: wpPost.link || null,
           }]);
         }
-      } catch(e) { console.error("Used keyword hook error:", e.message); }
+      } catch(e) { console.error("scheduled_jobs insert error:", e.message); }
     }
-    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, qa, repairHistory, gbpResult, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta, yoastOpt: yoastOptResult });
+
+    // ── Respond immediately — post is live ────────────────────────────────
+    res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, status: wpPost.status, featuredMediaId, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta });
+
+    // ── Background work — runs after response is sent ─────────────────────
+    setImmediate(async () => {
+      try {
+        // Yoast optimization loop (density, title, H2s, meta length)
+        if (wpPost.link && seoCaps.canWriteSeoMeta) {
+          try {
+            await runYoastOptimizeLoop(
+              wpPost.id,
+              { title, keyword, metaDescription: metaDescription },
+              wordpressUrl,
+              { ...authHeaders, "Content-Type": "application/json" },
+              seoCaps
+            );
+          } catch(e) { console.error("[YoastOpt/bg] Loop threw:", e.message); }
+        }
+
+        // Keyword cleanup
+        if (clientId && keyword) {
+          try {
+            const { data: existingUsed } = await supabase.from("client_used_keywords")
+              .select("id").eq("client_id", clientId).eq("keyword", keyword.trim()).single();
+            if (!existingUsed) {
+              await supabase.from("client_used_keywords")
+                .insert([{ client_id: clientId, keyword: keyword.trim(), added_at: new Date().toISOString() }]);
+            }
+            await supabase.from("client_keyword_queue")
+              .delete().eq("client_id", clientId).ilike("keyword", keyword.trim());
+          } catch(e) { console.error("[bg] Used keyword hook error:", e.message); }
+        }
+
+        // GBP auto-post
+        if (clientId && wpPost.link && agencyGbpToken.refresh_token) {
+          try {
+            const { data: clientData } = await supabase.from("clients").select("gbp_location_name").eq("id", clientId).single();
+            if (clientData?.gbp_location_name) {
+              const access_token = await getAgencyAccessToken();
+              const gbpBody = {
+                languageCode: "en",
+                summary: metaDescription || `${title} — read our latest post for expert tips and advice.`,
+                topicType: "STANDARD",
+                callToAction: { actionType: "LEARN_MORE", url: wpPost.link },
+                ...(featuredImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: featuredImageUrl }] } : {}),
+              };
+              await axios.post(
+                `https://mybusiness.googleapis.com/v4/${clientData.gbp_location_name}/localPosts`,
+                gbpBody,
+                { headers: { Authorization: `Bearer ${await getAgencyAccessToken()}`, "Content-Type": "application/json" } }
+              );
+              console.log("[bg] ✓ GBP post auto-published for client", clientId);
+            }
+          } catch(gbpErr) { console.error("[bg] GBP auto-post error:", gbpErr.response?.data || gbpErr.message); }
+        }
+      } catch(e) { console.error("[bg] Post-publish background error:", e.message); }
+    });
   } catch (error) {
     console.error("WordPress publish error:", error.response?.data || error.message);
     res.status(500).json({ error: "Failed to publish to WordPress", detail: error.response?.data?.message || error.message });
