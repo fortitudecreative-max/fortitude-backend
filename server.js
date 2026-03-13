@@ -478,8 +478,23 @@ app.get("/api/posts", async (req, res) => {
 });
 
 // ─── CONTENT GENERATION ──────────────────────────────────────────
+
+// ─── ONE-TIME MIGRATION: add ai_personality column ────────────────────────────
+app.post("/api/admin/migrate-ai-personality", requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase.rpc("exec_sql", { query: "ALTER TABLE clients ADD COLUMN IF NOT EXISTS ai_personality jsonb;" });
+    if (error) {
+      // Try direct query via pg if rpc not available
+      return res.json({ note: "rpc not available - add column manually in Supabase SQL editor: ALTER TABLE clients ADD COLUMN IF NOT EXISTS ai_personality jsonb;", error: error.message });
+    }
+    res.json({ success: true });
+  } catch(e) {
+    res.json({ note: "Run this in Supabase SQL editor: ALTER TABLE clients ADD COLUMN IF NOT EXISTS ai_personality jsonb;", error: e.message });
+  }
+});
+
 app.post("/api/content/generate", async (req, res) => {
-  const { keyword, industry, clientName, clientId, brandVoice, wordpressUrl } = req.body;
+  const { keyword, industry, clientName, clientId, brandVoice, wordpressUrl, aiPersonality } = req.body;
   if (!keyword || !industry) return res.status(400).json({ error: "keyword and industry are required" });
 
   try {
@@ -547,7 +562,22 @@ Include 1-2 external links to authoritative sources. Follow these rules strictly
    - Roofing: nrca.net
    - General home safety: cpsc.gov`;
 
-    const systemPrompt = `You are a professional SEO content writer specializing in home service companies.
+    // Build AI personality block
+  const buildPersonalityPrompt = (personality) => {
+    if (!personality) return "";
+    const parts = [];
+    if (personality.tone) parts.push(`TONE & PERSONALITY: ${personality.tone}`);
+    if (personality.rules && personality.rules.length > 0) {
+      const activeRules = personality.rules.filter(r => !r.disabled);
+      if (activeRules.length > 0) parts.push("CONTENT RULES:\n" + activeRules.map(r => `- ${r.text}`).join("\n"));
+    }
+    if (personality.excluded_words && personality.excluded_words.length > 0) {
+      parts.push("NEVER USE THESE WORDS OR PHRASES (strictly forbidden in all content):\n" + personality.excluded_words.map(w => `- "${w}"`).join("\n"));
+    }
+    return parts.length > 0 ? "\n\nCLIENT-SPECIFIC AI PERSONALITY:\n" + parts.join("\n\n") : "";
+  };
+
+  const systemPrompt = `You are a professional SEO content writer specializing in home service companies.
 You write blog posts that are helpful, locally relevant, and optimized for search engines.
 Always write in a friendly, trustworthy tone that homeowners relate to.
 ${brandVoice ? `Brand voice for ${clientName}: ${brandVoice}` : ""}
@@ -559,7 +589,7 @@ CRITICAL CONTENT RULE: This blog content is for a professional home service comp
 - Always recommend contacting a licensed professional for actual repairs
 - Use phrases like "a certified technician will...", "your HVAC pro will...", "call ${clientName} to..."
 - For how-to style posts, frame the steps as "how to identify if you need X" or "what to expect when a pro fixes X" — not "how to fix X yourself"
-This keeps content valuable for SEO while protecting the business's service revenue.`;
+This keeps content valuable for SEO while protecting the business's service revenue.${buildPersonalityPrompt(aiPersonality)}`;
 
     const isHowToKeyword = /how.?to|step|guide|diy|install|fix|replace|repair|maintain|clean|troubleshoot/i.test(keyword);
     const userPrompt = `Write a complete SEO blog post for a ${industry} company called "${clientName || "our company"}" targeting the keyword: "${keyword}"
