@@ -50,7 +50,7 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.get("/api/health", (req, res) => res.json({ status: "ok", ts: Date.now() }));
 
 // All /api/* routes require a valid Supabase session (except /api/health above)
-app.use("/api", (req, res, next) => { // Webhook endpoints moved to fortitude-leads-backend return requireAuth(req, res, next); });
+app.use("/api", (req, res, next) => { if (["/rb2b-webhook", "/snitcher-webhook"].includes(req.path)) return next(); return requireAuth(req, res, next); });
 
 // ─── CLIENTS ────────────────────────────────────────────────────
 app.get("/api/clients", async (req, res) => {
@@ -4758,6 +4758,47 @@ app.get("/api/gbp/posts/:clientId", async (req, res) => {
   }
 });
 
+// RB2B Telegram Webhook
+app.post("/api/rb2b-webhook", async (req, res) => {
+    try {
+          const p = req.body;
+          const name = `${p.first_name || ""} ${p.last_name || ""}`.trim() || "Unknown";
+          const company = p.company_name || p.employer || "Unknown Company";
+          const title = p.job_title || p.title || "N/A";
+          const linkedin = p.linkedin_url || p.profile_url || "N/A";
+          const page = p.page_url || p.current_url || "N/A";
+          const msg = `🔔 New Visitor Identified\n👤 ${name}\n🏢 ${company}\n💼 ${title}\n🔗 ${linkedin}\n📄 ${page}`;
+          await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                  chat_id: process.env.TELEGRAM_CHAT_ID,
+                  text: msg
+          });
+          res.json({ success: true });
+    } catch (e) {
+          console.error("RB2B webhook error:", e.message);
+          res.status(500).json({ error: e.message });
+    }
+});
+
+// Snitcher Telegram Webhookh
+app.post("/api/snitcher-webhook", async (req, res) => {
+    try {
+          const v = req.body?.visitor || req.body;
+          const c = v?.company || v;
+          const s = v?.session || {};
+          const name = c?.name || "Unknown Company";
+          const domain = c?.domain || "";
+          const industry = c?.industry || "";
+          const employees = c?.employees || "";
+          const country = c?.country || "";
+          const pages = s?.pages_viewed || "";
+          const duration = s?.duration ? `${Math.round(s.duration / 60)} min` : "";
+          const source = s?.source || "";
+          const landing = s?.landing_page || "";
+          const msg = `🏢 New Company Identified\n🏗 ${name}${domain ? ` (${domain})` : ""}\n🏭 ${industry}${employees ? ` | ${employees} employees` : ""}${country ? `\n🌎 ${country}` : ""}${pages ? `\n📄 ${pages} pages${duration ? ` | ${duration}` : ""}${source ? ` | via ${source}` : ""}` : ""}${landing ? `\n🛬 ${landing}` : ""}`;
+          await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                  chat_id: process.env.TELEGRAM_CHAT_ID,
+                  text: msg
+          });
           res.json({ success: true });
     } catch (e) {
           console.error("Snitcher webhook error:", e.message);
