@@ -16,7 +16,7 @@ const { createClient } = require("@supabase/supabase-js");
 const cron = require("node-cron");
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ── Auth middleware ────────────────────────────────────────────────────────────
+// ── Auth middleware ───────────────────────────────────────────────────────────h─
 // Creates a per-request supabase client using the user's JWT so we can verify
 // their session server-side. All /api/* routes require a valid Supabase session.
 const requireAuth = async (req, res, next) => {
@@ -50,7 +50,7 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.get("/api/health", (req, res) => res.json({ status: "ok", ts: Date.now() }));
 
 // All /api/* routes require a valid Supabase session (except /api/health above)
-app.use("/api", requireAuth);
+app.use("/api", (req, res, next) => { if (req.path === "/rb2b-webhook") return next(); return requireAuth(req, res, next); });
 
 // ─── CLIENTS ────────────────────────────────────────────────────
 app.get("/api/clients", async (req, res) => {
