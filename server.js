@@ -4777,7 +4777,7 @@ app.post("/api/rb2b-webhook", async (req, res) => {
           console.error("RB2B webhook error:", e.message);
           res.status(500).json({ error: e.message });
     }
-});h
+});
 
 // Snitcher Telegram Webhookh
 app.post("/api/snitcher-webhook", async (req, res) => {
@@ -4804,7 +4804,7 @@ app.post("/api/snitcher-webhook", async (req, res) => {
           console.error("Snitcher webhook error:", e.message);
           res.status(500).json({ error: e.message });
     }
-});h
+});
 
 app.listen(PORT, () => {
   console.log("✓ Fortitude backend running on http://localhost:" + PORT);
