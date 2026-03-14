@@ -22,7 +22,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const requireAuth = async (req, res, next) => {
   // EventSource (SSE) can't send headers, so also accept token as query param
   const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith("Bearer ") 
+  const token = authHeader?.startsWith("Bearer ")
     ? authHeader.split(" ")[1] 
     : req.query.token;
   if (!token) {
@@ -50,7 +50,7 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.get("/api/health", (req, res) => res.json({ status: "ok", ts: Date.now() }));
 
 // All /api/* routes require a valid Supabase session (except /api/health above)
-app.use("/api", (req, res, next) => { if (req.path === "/rb2b-webhook") return next(); return requireAuth(req, res, next); });
+app.use("/api", (req, res, next) => { if (["/rb2b-webhook", "/snitcher-webhook"].includes(req.path)) return next(); return requireAuth(req, res, next); });
 
 // ─── CLIENTS ────────────────────────────────────────────────────
 app.get("/api/clients", async (req, res) => {
