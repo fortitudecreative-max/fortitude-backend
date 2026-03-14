@@ -4770,7 +4770,7 @@ app.post("/api/rb2b-webhook", async (req, res) => {
           const msg = `🔔 New Visitor Identified\n👤 ${name}\n🏢 ${company}\n💼 ${title}\n🔗 ${linkedin}\n📄 ${page}`;
           await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
                   chat_id: process.env.TELEGRAM_CHAT_ID,
-                  text: msgh
+                  text: msg
           });
           res.json({ success: true });
     } catch (e) {
