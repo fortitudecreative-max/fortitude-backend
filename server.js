@@ -1,4 +1,4 @@
-hconst express = require("express");
+const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const multer = require("multer");
@@ -16,7 +16,7 @@ const { createClient } = require("@supabase/supabase-js");
 const cron = require("node-cron");
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ── Auth middleware ───────────────────────────────────────────────────────────h─
+// ── Auth middleware ───────────────────────────────────────────────────────────
 // Creates a per-request supabase client using the user's JWT so we can verify
 // their session server-side. All /api/* routes require a valid Supabase session.
 const requireAuth = async (req, res, next) => {
