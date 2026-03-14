@@ -1,4 +1,4 @@
-const express = require("express");
+hconst express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const multer = require("multer");
@@ -4770,14 +4770,41 @@ app.post("/api/rb2b-webhook", async (req, res) => {
           const msg = `🔔 New Visitor Identified\n👤 ${name}\n🏢 ${company}\n💼 ${title}\n🔗 ${linkedin}\n📄 ${page}`;
           await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
                   chat_id: process.env.TELEGRAM_CHAT_ID,
-                  text: msg
+                  text: msgh
           });
           res.json({ success: true });
     } catch (e) {
           console.error("RB2B webhook error:", e.message);
           res.status(500).json({ error: e.message });
     }
-});
+});h
+
+// Snitcher Telegram Webhookh
+app.post("/api/snitcher-webhook", async (req, res) => {
+    try {
+          const v = req.body?.visitor || req.body;
+          const c = v?.company || v;
+          const s = v?.session || {};
+          const name = c?.name || "Unknown Company";
+          const domain = c?.domain || "";
+          const industry = c?.industry || "";
+          const employees = c?.employees || "";
+          const country = c?.country || "";
+          const pages = s?.pages_viewed || "";
+          const duration = s?.duration ? `${Math.round(s.duration / 60)} min` : "";
+          const source = s?.source || "";
+          const landing = s?.landing_page || "";
+          const msg = `🏢 New Company Identified\n🏗 ${name}${domain ? ` (${domain})` : ""}\n🏭 ${industry}${employees ? ` | ${employees} employees` : ""}${country ? `\n🌎 ${country}` : ""}${pages ? `\n📄 ${pages} pages${duration ? ` | ${duration}` : ""}${source ? ` | via ${source}` : ""}` : ""}${landing ? `\n🛬 ${landing}` : ""}`;
+          await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                  chat_id: process.env.TELEGRAM_CHAT_ID,
+                  text: msg
+          });
+          res.json({ success: true });
+    } catch (e) {
+          console.error("Snitcher webhook error:", e.message);
+          res.status(500).json({ error: e.message });
+    }
+});h
 
 app.listen(PORT, () => {
   console.log("✓ Fortitude backend running on http://localhost:" + PORT);
