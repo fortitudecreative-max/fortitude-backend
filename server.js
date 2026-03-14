@@ -4758,6 +4758,27 @@ app.get("/api/gbp/posts/:clientId", async (req, res) => {
   }
 });
 
+// RB2B Telegram Webhook
+app.post("/api/rb2b-webhook", async (req, res) => {
+    try {
+          const p = req.body;
+          const name = `${p.first_name || ""} ${p.last_name || ""}`.trim() || "Unknown";
+          const company = p.company_name || p.employer || "Unknown Company";
+          const title = p.job_title || p.title || "N/A";
+          const linkedin = p.linkedin_url || p.profile_url || "N/A";
+          const page = p.page_url || p.current_url || "N/A";
+          const msg = `🔔 New Visitor Identified\n👤 ${name}\n🏢 ${company}\n💼 ${title}\n🔗 ${linkedin}\n📄 ${page}`;
+          await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                  chat_id: process.env.TELEGRAM_CHAT_ID,
+                  text: msg
+          });
+          res.json({ success: true });
+    } catch (e) {
+          console.error("RB2B webhook error:", e.message);
+          res.status(500).json({ error: e.message });
+    }
+});
+
 app.listen(PORT, () => {
   console.log("✓ Fortitude backend running on http://localhost:" + PORT);
   console.log("✓ SEMrush: " + (SEMRUSH_API_KEY ? "loaded" : "MISSING"));
