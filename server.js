@@ -662,7 +662,7 @@ ${existingContentPrompt}
 ${regenPrompt ? `\n\nIMPORTANT — The user has reviewed a previous draft and wants the following changes or new direction. Apply these fully:\n${regenPrompt}\n` : ""}Return your response as JSON with exactly this structure:
 {
   "title": "SEO optimized blog post title — STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
-  "metaDescription": "Meta description — STRICT range: 120-156 characters total including spaces. Count character by character before submitting. Must be at least 120 and no more than 156 characters. Include the target keyword naturally.",
+  "metaDescription": "Meta description — STRICT range: 120-140 characters total including spaces. Count character by character before submitting. Must be at least 120 and no more than 140 characters. Include the target keyword naturally.",
   "slug": "url-friendly-slug",
   "content": "Full HTML only — NO markdown whatsoever. Use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <a> tags exclusively. Never use **, --, ##, or any markdown syntax. All bullet points must be <ul><li> HTML. All bold must be <strong>. Minimum 800 words.",
   "wordCount": estimated word count as integer,
@@ -699,21 +699,21 @@ Return only the JSON, no other text.`;
     post.content = markdownToHtml(post.content);
 
     // Meta description retry loop — never truncate, always regenerate if over 60
-    if (post.metaDescription && (post.metaDescription.length < 120 || post.metaDescription.length > 156)) {
+    if (post.metaDescription && (post.metaDescription.length < 120 || post.metaDescription.length > 140)) {
       let metaAttempts = 0;
-      while ((post.metaDescription.length < 120 || post.metaDescription.length > 156) && metaAttempts < 3) {
+      while ((post.metaDescription.length < 120 || post.metaDescription.length > 140) && metaAttempts < 3) {
         metaAttempts++;
-        console.log(`[Meta] Out of 120-156 range (${post.metaDescription.length}) — retry ${metaAttempts}: "${post.metaDescription}"`);
+        console.log(`[Meta] Out of 120-140 range (${post.metaDescription.length}) — retry ${metaAttempts}: "${post.metaDescription}"`);
         try {
           const metaRetry = await client.messages.create({
             model: "claude-sonnet-4-20250514",
             max_tokens: 100,
-            messages: [{ role: "user", content: `Rewrite this meta description to be between 120-156 characters total including spaces. It must include the keyword "${keyword}" and convey the same meaning. Count every character carefully — must be at least 120 and no more than 156. Return ONLY the new meta description text, no quotes, no explanation.
+            messages: [{ role: "user", content: `Rewrite this meta description to be between 120-140 characters total including spaces. It must include the keyword "${keyword}" and convey the same meaning. Count every character carefully — must be at least 120 and no more than 140. Return ONLY the new meta description text, no quotes, no explanation.
 
 Current (${post.metaDescription.length} chars): ${post.metaDescription}` }],
           });
           const newMeta = metaRetry.content[0]?.text?.trim().replace(/^["']|["']$/g, "") || "";
-          if (newMeta.length >= 120 && newMeta.length <= 156) {
+          if (newMeta.length >= 120 && newMeta.length <= 140) {
             post.metaDescription = newMeta;
             console.log(`[Meta] Retry ${metaAttempts} succeeded: "${newMeta}" (${newMeta.length} chars)`);
           } else {
@@ -724,9 +724,9 @@ Current (${post.metaDescription.length} chars): ${post.metaDescription}` }],
           break;
         }
       }
-      // Last resort: if still over 156 after 3 retries, trim at word boundary
-      if (post.metaDescription.length > 156) {
-        const trimmed = post.metaDescription.slice(0, 156);
+      // Last resort: if still over 140 after 3 retries, trim at word boundary
+      if (post.metaDescription.length > 140) {
+        const trimmed = post.metaDescription.slice(0, 140);
         const lastSpace = trimmed.lastIndexOf(" ");
         post.metaDescription = lastSpace > 100 ? trimmed.slice(0, lastSpace) : trimmed;
         console.log(`[Meta] Hard-trimmed at word boundary: "${post.metaDescription}"`);
@@ -2377,7 +2377,7 @@ const MAX_REPAIR_CYCLES = 3;
 //   - Keyphrase density (too low)        → AI content rewrite
 //   - Keyphrase not in SEO title         → AI title rewrite via Fortitude plugin
 //   - Keyphrase missing from H2/H3s      → AI content rewrite
-//   - Meta description out of 120-156 char range → AI meta rewrite via Fortitude plugin
+//   - Meta description out of 120-140 char range → AI meta rewrite via Fortitude plugin
 // ─────────────────────────────────────────────────────────────────────────────
 const YOAST_MAX_PASSES = 5;
 
@@ -2459,7 +2459,7 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
     if (!hasKwInHeading) issues.push({ type: "subheadings", headings: headings.slice(0, 6) });
 
     // Meta description length
-    if (meta.length < 120 || meta.length > 156) issues.push({ type: "meta_length", length: meta.length });
+    if (meta.length < 120 || meta.length > 140) issues.push({ type: "meta_length", length: meta.length });
 
     return issues;
   };
@@ -2525,15 +2525,15 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
       attemptedThisPass.push("meta_length");
       const priorMetaFails = passHistory.filter(h => h.attempted.includes("meta_length")).length;
       const metaPrompt = priorMetaFails > 0
-        ? `PREVIOUS ${priorMetaFails} ATTEMPT(S) FAILED — result was out of 120-156 char range. Rewrite to be between 120-156 characters total including spaces while keeping "${keyword}". Count carefully. Return ONLY the text, no quotes.\n\nCurrent (${metaIssue.length} chars): "${currentMeta}"`
-        : `Rewrite to be between 120-156 characters total including spaces while keeping the keyphrase "${keyword}". Count carefully. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"`;
+        ? `PREVIOUS ${priorMetaFails} ATTEMPT(S) FAILED — result was out of 120-140 char range. Rewrite to be between 120-140 characters total including spaces while keeping "${keyword}". Count carefully. Return ONLY the text, no quotes.\n\nCurrent (${metaIssue.length} chars): "${currentMeta}"`
+        : `Rewrite to be between 120-140 characters total including spaces while keeping the keyphrase "${keyword}". Count carefully. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"`;
       try {
         const msg = await anthropic.messages.create({
           model: "claude-sonnet-4-20250514", max_tokens: 300,
           messages: [{ role: "user", content: metaPrompt }]
         });
         const newMeta = msg.content[0].text.trim().replace(/^["']|["']$/g, "");
-        if (newMeta.length >= 120 && newMeta.length <= 156) {
+        if (newMeta.length >= 120 && newMeta.length <= 140) {
           currentMeta = newMeta; metaChanged = true;
           fixes.push({ pass, type: "meta_length", fix: `Trimmed to ${newMeta.length} chars` });
           log(`Fixed meta: ${newMeta.length} chars`);
@@ -2829,7 +2829,7 @@ This protects the business's service revenue while keeping content SEO-valuable.
 
 Return ONLY valid JSON with these exact fields:
 - title: SEO title — STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
-- metaDescription: meta description — STRICT range: 120-156 characters total including spaces. Count character by character. Must be at least 120 and no more than 156.
+- metaDescription: meta description — STRICT range: 120-140 characters total including spaces. Count character by character. Must be at least 120 and no more than 140.
 - slug: URL slug (lowercase, hyphens)
 - content: pure HTML body using <h2>, <h3>, <p>, <ul>, <li>, <strong>, <a> tags ONLY. NO markdown whatsoever.
 - wordCount: integer word count
@@ -2900,7 +2900,7 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
     }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
 
     // ── Yoast meta: full-caps detection + 3-path write (same as manual publish) ────
-    const schSafeMetaDesc = (post.metaDescription || "").length > 156
+    const schSafeMetaDesc = (post.metaDescription || "").length > 140
       ? (post.metaDescription || "").slice(0, 153).trimEnd() + "..."
       : (post.metaDescription || "");
     const schLongtailKw = makeLongtailKeyphrase(keyword);
@@ -4246,7 +4246,7 @@ app.post("/api/seo/fix", async (req, res) => {
           const text = ph.replace(/<[^>]+>/g," ").trim().slice(0, 1500);
           const cur = ph.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim() || "";
           val = await ai(`Write an SEO title tag. 50-60 chars, include primary keyword. ${cur ? `Current: "${cur}". ` : ""}Content: "${text.slice(0,800)}". Return ONLY the title.`, 200);
-          if (val.length > 156) { const t = val.slice(0, 156); const ls = t.lastIndexOf(" "); val = ls > 100 ? t.slice(0, ls) : t; }
+          if (val.length > 140) { const t = val.slice(0, 140); const ls = t.lastIndexOf(" "); val = ls > 100 ? t.slice(0, ls) : t; }
         }
         ctx.val = val;
         return [
