@@ -617,12 +617,12 @@ Internal linking rules — follow this structure:
       : "";
 
     const externalLinksPrompt = `\n\nEXTERNAL LINKS — OUTBOUND LINKING RULES:
-Include 1-2 external links to authoritative sources relevant to this industry. Follow these rules strictly:
-1. Only link to government websites (.gov), established industry associations, or universally recognized high-authority sources that are directly relevant to the topic of this post.
-2. Only use a URL you are certain exists from your training data. If you are not confident a specific URL is real and accurate, link to the root domain only (e.g., epa.gov, osha.gov) — never construct or guess a deep slug.
-3. The linked source must contain information genuinely relevant to THIS post's topic and industry. Do not force a government link that is off-topic just to include one — if no clearly relevant authoritative source exists, skip the external link entirely.
-4. Reference the source naturally inline (e.g., "According to the EPA..." or "The SBA reports that...") with anchor text that describes what the reader will find — not "click here" or a bare URL.
-5. NEVER fabricate statistics, studies, or citations. If you reference a fact, it must be something you are confident is accurate — not invented to support the link.`;
+Include 1-2 external links to specific, relevant pages on high-authority websites. Follow these rules strictly:
+1. Link to a SPECIFIC PAGE — a real article, guide, stat page, or resource — not a homepage or root domain. The page must be directly relevant to the topic of this post.
+2. The source can be any high-authority site: government (.gov), major industry associations, well-known publications (Forbes, HBR, Entrepreneur, etc.), or recognized research organizations. Match the source to the industry — do not use off-topic domains just because they are authoritative.
+3. Only use a URL you are genuinely confident exists from your training data. If you are not certain a specific page URL is real, skip the external link entirely — do NOT fall back to a homepage, do NOT construct a plausible-looking slug, do NOT fabricate.
+4. Reference the source naturally inline (e.g., "According to Forbes..." or "The EPA reports...") with anchor text that describes the content — not "click here" or a bare URL.
+5. NEVER invent statistics, studies, or citations. Every fact you cite must be something you are confident is accurate from your training data — not fabricated to justify including a link.`;
 
     // Build AI personality block
   const buildPersonalityPrompt = (personality) => {
@@ -2805,12 +2805,12 @@ const publishPostForClient = async (client, keyword) => {
     const externalLinksPrompt = `
 
 EXTERNAL LINKS — OUTBOUND LINKING RULES:
-Include 1-2 external links to authoritative sources relevant to this industry. Follow these rules strictly:
-1. Only link to government websites (.gov), established industry associations, or universally recognized high-authority sources that are directly relevant to the topic of this post.
-2. Only use a URL you are certain exists from your training data. If you are not confident a specific URL is real and accurate, link to the root domain only (e.g., epa.gov, osha.gov) — never construct or guess a deep slug.
-3. The linked source must contain information genuinely relevant to THIS post's topic and industry. Do not force a government link that is off-topic just to include one — if no clearly relevant authoritative source exists, skip the external link entirely.
-4. Reference the source naturally inline (e.g., "According to the EPA..." or "The SBA reports that...") with anchor text that describes what the reader will find — not "click here" or a bare URL.
-5. NEVER fabricate statistics, studies, or citations. If you reference a fact, it must be something you are confident is accurate — not invented to support the link.`;
+Include 1-2 external links to specific, relevant pages on high-authority websites. Follow these rules strictly:
+1. Link to a SPECIFIC PAGE — a real article, guide, stat page, or resource — not a homepage or root domain. The page must be directly relevant to the topic of this post.
+2. The source can be any high-authority site: government (.gov), major industry associations, well-known publications (Forbes, HBR, Entrepreneur, etc.), or recognized research organizations. Match the source to the industry — do not use off-topic domains just because they are authoritative.
+3. Only use a URL you are genuinely confident exists from your training data. If you are not certain a specific page URL is real, skip the external link entirely — do NOT fall back to a homepage, do NOT construct a plausible-looking slug, do NOT fabricate.
+4. Reference the source naturally inline (e.g., "According to Forbes..." or "The EPA reports...") with anchor text that describes the content — not "click here" or a bare URL.
+5. NEVER invent statistics, studies, or citations. Every fact you cite must be something you are confident is accurate from your training data — not fabricated to justify including a link.`;
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
