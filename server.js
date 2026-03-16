@@ -235,7 +235,7 @@ const autoTagImage = async (imageBuffer, mimeType, industry) => {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mimeType, data: base64 } },
-          { type: "text", text: `Look at this image and respond with ONLY a JSON object (no markdown, no explanation) with two fields: "category" (a short 1-3 word label like "technician", "truck", "exterior", "team", "equipment", "before-after", "logo", "office") and "description" (one sentence describing what is shown, useful for SEO alt text).${industryHint} Example: {"category":"technician","description":"A technician in uniform inspecting an HVAC unit on a rooftop."}` }
+          { type: "text", text: `Look at this image and respond with ONLY a JSON object (no markdown, no explanation) with two fields: "category" (a short 1-3 word label that specifically identifies the main subject -- derive it from what you actually see, e.g. "water heater", "electrical panel", "roof vent", "technician", "service truck", "team photo", "before-after", "office") and "description" (one sentence describing what is shown, useful for SEO alt text).${industryHint} The category must reflect the specific subject matter, not a generic type like "equipment". Example: {"category":"water heater","description":"A newly installed water heater with expansion tank in a utility room."}` }
         ]
       }]
     });
