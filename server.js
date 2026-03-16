@@ -221,6 +221,34 @@ app.delete("/api/keywords/used-client/:id", async (req, res) => {
 // ─── IMAGE LIBRARY ───────────────────────────────────────────────
 const upload = multer({ storage: multer.memoryStorage() });
 
+// Auto-tag an image using Claude vision - returns { category, description }
+const autoTagImage = async (imageBuffer, mimeType, industry) => {
+  try {
+    const Anthropic = require("@anthropic-ai/sdk");
+    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+    const base64 = imageBuffer.toString("base64");
+    const industryHint = industry ? ` The client is in the ${industry} industry.` : "";
+    const resp = await anthropic.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 120,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: mimeType, data: base64 } },
+          { type: "text", text: `Look at this image and respond with ONLY a JSON object (no markdown, no explanation) with two fields: "category" (a short 1-3 word label like "technician", "truck", "exterior", "team", "equipment", "before-after", "logo", "office") and "description" (one sentence describing what is shown, useful for SEO alt text).${industryHint} Example: {"category":"technician","description":"A technician in uniform inspecting an HVAC unit on a rooftop."}` }
+        ]
+      }]
+    });
+    const text = resp.content[0]?.text?.trim() || "";
+    const clean = text.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean);
+    return { category: parsed.category || "", description: parsed.description || "" };
+  } catch (e) {
+    console.error("[autoTagImage] Failed:", e.message);
+    return { category: "", description: "" };
+  }
+};
+
 app.get("/api/images", async (req, res) => {
   const { industry, category, client_id, all } = req.query;
   let query = supabase.from("image_library").select("*").order("created_at", { ascending: false });
@@ -262,7 +290,9 @@ app.post("/api/images/upload-bulk", upload.array("images", 50), requireAuth, asy
         .upload(storagePath, file.buffer, { contentType: file.mimetype });
       if (uploadError) { errors.push({ filename: file.originalname, error: uploadError.message }); continue; }
       const { data: urlData } = supabase.storage.from("image-library").getPublicUrl(storagePath);
-      const insertData = { filename: file.originalname, industry: industry || null, category: "", storage_path: urlData.publicUrl };
+      // Auto-tag with Claude vision
+      const { category: autoCategory, description: autoDescription } = await autoTagImage(file.buffer, file.mimetype, industry);
+      const insertData = { filename: file.originalname, industry: industry || null, category: autoCategory, description: autoDescription, storage_path: urlData.publicUrl };
       const { data, error } = await supabase.from("image_library").insert([insertData]).select();
       if (error) { errors.push({ filename: file.originalname, error: error.message }); continue; }
       results.push(data[0]);
@@ -330,7 +360,16 @@ app.post("/api/images/upload", upload.single("image"), async (req, res) => {
 
   const { data: urlData } = supabase.storage.from("image-library").getPublicUrl(storagePath);
 
-  const insertData = { filename: file.originalname, industry, category, storage_path: urlData.publicUrl };
+  // Auto-tag with Claude vision only if no category was manually provided
+  let finalCategory = category || "";
+  let finalDescription = "";
+  if (!category || category === "general" || category === "") {
+    const tagged = await autoTagImage(file.buffer, file.mimetype, industry);
+    finalCategory = tagged.category || category || "";
+    finalDescription = tagged.description || "";
+  }
+
+  const insertData = { filename: file.originalname, industry, category: finalCategory, description: finalDescription, storage_path: urlData.publicUrl };
   if (client_id) insertData.client_id = client_id;
 
   const { data, error } = await supabase.from("image_library").insert([insertData]).select();
