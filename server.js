@@ -277,16 +277,30 @@ app.post("/api/images/assign-clients", requireAuth, async (req, res) => {
   const { imageIds, clientIds } = req.body;
   if (!imageIds?.length || !clientIds?.length) return res.status(400).json({ error: "imageIds and clientIds required" });
 
-  const { data: sourceImages } = await supabase.from("image_library").select("*").in("id", imageIds);
-  if (!sourceImages?.length) return res.status(404).json({ error: "Images not found" });
+  console.log(`[Assign] imageIds=${JSON.stringify(imageIds)} clientIds=${JSON.stringify(clientIds)}`);
+
+  const { data: sourceImages, error: fetchErr } = await supabase.from("image_library").select("*").in("id", imageIds);
+  if (fetchErr) { console.error("[Assign] Fetch error:", fetchErr.message); return res.status(500).json({ error: fetchErr.message }); }
+  if (!sourceImages?.length) {
+    console.log("[Assign] No source images found for ids:", imageIds);
+    return res.status(404).json({ error: "Images not found" });
+  }
+  console.log(`[Assign] Found ${sourceImages.length} source images`);
 
   const inserted = [];
+  const skipped = [];
+  const errors = [];
+
   for (const img of sourceImages) {
     for (const clientId of clientIds) {
       // Skip only if this client already has a row with this exact storage_path (true dupe check)
       const { data: existing } = await supabase.from("image_library")
         .select("id").eq("client_id", clientId).eq("storage_path", img.storage_path).maybeSingle();
-      if (existing) { console.log(`[Assign] Skipping duplicate storage_path=${img.storage_path} for client=${clientId}`); continue; }
+      if (existing) {
+        console.log(`[Assign] Skipping duplicate storage_path=${img.storage_path} for client=${clientId}`);
+        skipped.push({ imgId: img.id, clientId });
+        continue;
+      }
       const { data, error } = await supabase.from("image_library").insert([{
         filename: img.filename,
         industry: img.industry,
@@ -295,11 +309,16 @@ app.post("/api/images/assign-clients", requireAuth, async (req, res) => {
         storage_path: img.storage_path,
         client_id: clientId,
       }]).select();
-      if (error) console.error("[Assign] Insert error:", error.message);
+      if (error) {
+        console.error(`[Assign] Insert error for img=${img.id} client=${clientId}:`, error.message, error.code, error.details);
+        errors.push({ imgId: img.id, clientId, error: error.message, code: error.code });
+      }
       if (!error && data?.[0]) inserted.push(data[0]);
     }
   }
-  res.json({ assigned: inserted.length, rows: inserted });
+
+  console.log(`[Assign] Done — inserted=${inserted.length} skipped=${skipped.length} errors=${errors.length}`);
+  res.json({ assigned: inserted.length, skipped: skipped.length, errors, rows: inserted });
 });
 
 app.post("/api/images/upload", upload.single("image"), async (req, res) => {
