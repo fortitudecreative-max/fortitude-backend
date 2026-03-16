@@ -280,6 +280,7 @@ app.post("/api/images/upload-bulk", upload.array("images", 50), requireAuth, asy
   const results = [];
   const errors = [];
 
+  // Step 1: upload all files and insert DB rows immediately (no tagging yet)
   for (const file of files) {
     try {
       const folder = `staging/${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
@@ -290,17 +291,30 @@ app.post("/api/images/upload-bulk", upload.array("images", 50), requireAuth, asy
         .upload(storagePath, file.buffer, { contentType: file.mimetype });
       if (uploadError) { errors.push({ filename: file.originalname, error: uploadError.message }); continue; }
       const { data: urlData } = supabase.storage.from("image-library").getPublicUrl(storagePath);
-      // Auto-tag with Claude vision
-      const { category: autoCategory, description: autoDescription } = await autoTagImage(file.buffer, file.mimetype, industry);
-      const insertData = { filename: file.originalname, industry: industry || null, category: autoCategory, description: autoDescription, storage_path: urlData.publicUrl };
+      const insertData = { filename: file.originalname, industry: industry || null, category: "", description: "", storage_path: urlData.publicUrl };
       const { data, error } = await supabase.from("image_library").insert([insertData]).select();
       if (error) { errors.push({ filename: file.originalname, error: error.message }); continue; }
-      results.push(data[0]);
+      results.push({ ...data[0], _buffer: file.buffer, _mime: file.mimetype });
     } catch (e) {
       errors.push({ filename: file.originalname, error: e.message });
     }
   }
-  res.json({ uploaded: results, errors });
+
+  // Step 2: respond immediately so the browser gets the images right away
+  res.json({ uploaded: results.map(r => { const { _buffer, _mime, ...rest } = r; return rest; }), errors });
+
+  // Step 3: auto-tag in background after response is sent
+  for (const row of results) {
+    try {
+      const { category, description } = await autoTagImage(row._buffer, row._mime, industry);
+      if (category || description) {
+        await supabase.from("image_library").update({ category, description }).eq("id", row.id);
+        console.log(`[autoTag] Tagged id=${row.id} category="${category}"`);
+      }
+    } catch (e) {
+      console.error(`[autoTag] Failed for id=${row.id}:`, e.message);
+    }
+  }
 });
 
 app.post("/api/images/assign-clients", requireAuth, async (req, res) => {
@@ -360,21 +374,24 @@ app.post("/api/images/upload", upload.single("image"), async (req, res) => {
 
   const { data: urlData } = supabase.storage.from("image-library").getPublicUrl(storagePath);
 
-  // Auto-tag with Claude vision only if no category was manually provided
-  let finalCategory = category || "";
-  let finalDescription = "";
-  if (!category || category === "general" || category === "") {
-    const tagged = await autoTagImage(file.buffer, file.mimetype, industry);
-    finalCategory = tagged.category || category || "";
-    finalDescription = tagged.description || "";
-  }
-
-  const insertData = { filename: file.originalname, industry, category: finalCategory, description: finalDescription, storage_path: urlData.publicUrl };
+  const insertData = { filename: file.originalname, industry, category: category || "", description: "", storage_path: urlData.publicUrl };
   if (client_id) insertData.client_id = client_id;
 
   const { data, error } = await supabase.from("image_library").insert([insertData]).select();
   if (error) return res.status(500).json({ error: error.message });
+
+  // Respond immediately, then auto-tag in background if no category was manually provided
   res.json({ image: data[0] });
+
+  if (!category || category === "general" || category === "") {
+    try {
+      const { category: autoCategory, description: autoDescription } = await autoTagImage(file.buffer, file.mimetype, industry);
+      if (autoCategory || autoDescription) {
+        await supabase.from("image_library").update({ category: autoCategory, description: autoDescription }).eq("id", data[0].id);
+        console.log(`[autoTag] Tagged id=${data[0].id} category="${autoCategory}"`);
+      }
+    } catch (e) { console.error("[autoTag] Single upload tag failed:", e.message); }
+  }
 });
 
 // ─── CLIENT LOGO UPLOAD ──────────────────────────────────────────
