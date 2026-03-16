@@ -561,7 +561,7 @@ app.post("/api/admin/migrate-ai-personality", requireAuth, async (req, res) => {
 });
 
 app.post("/api/content/generate", async (req, res) => {
-  const { keyword, industry, clientName, clientId, brandVoice, wordpressUrl, aiPersonality } = req.body;
+  const { keyword, industry, clientName, clientId, brandVoice, wordpressUrl, aiPersonality, regenPrompt } = req.body;
   if (!keyword || !industry) return res.status(400).json({ error: "keyword and industry are required" });
 
   try {
@@ -664,7 +664,7 @@ ${internalLinksPrompt}
 ${externalLinksPrompt}
 ${existingContentPrompt}
 
-Return your response as JSON with exactly this structure:
+${regenPrompt ? `\n\nIMPORTANT — The user has reviewed a previous draft and wants the following changes or new direction. Apply these fully:\n${regenPrompt}\n` : ""}Return your response as JSON with exactly this structure:
 {
   "title": "SEO optimized blog post title — STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
   "metaDescription": "Meta description — STRICT range: 120-156 characters total including spaces. Count character by character before submitting. Must be at least 120 and no more than 156 characters. Include the target keyword naturally.",
