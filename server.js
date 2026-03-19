@@ -1043,6 +1043,12 @@ app.post("/api/publish/wordpress", async (req, res) => {
         const existingJob = await supabase.from("scheduled_jobs")
           .select("id").eq("client_id", clientId).eq("wp_post_id", wpPost.id).single();
         if (!existingJob.data) {
+          // Delete any orphaned failed/pending rows for this keyword before inserting published
+          await supabase.from("scheduled_jobs")
+            .delete()
+            .eq("client_id", clientId)
+            .eq("keyword", keyword.trim())
+            .in("status", ["failed", "pending"]);
           await supabase.from("scheduled_jobs").insert([{
             client_id: clientId,
             keyword: keyword.trim(),
