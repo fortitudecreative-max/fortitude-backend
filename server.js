@@ -4700,7 +4700,14 @@ app.post("/api/gbp/disconnect-agency", async (req, res) => {
   res.json({ success: true });
 });
 
+let gbpLocationsCache = { locations: null, fetchedAt: 0 };
+const GBP_CACHE_TTL = 5 * 60 * 1000; // cache for 5 minutes
+
 app.get("/api/gbp/locations", async (req, res) => {
+  // Return cached result if fresh enough
+  if (gbpLocationsCache.locations && Date.now() - gbpLocationsCache.fetchedAt < GBP_CACHE_TTL) {
+    return res.json({ locations: gbpLocationsCache.locations, cached: true });
+  }
   try {
     const access_token = await getAgencyAccessToken();
     const accountRes = await axios.get("https://mybusinessaccountmanagement.googleapis.com/v1/accounts", {
@@ -4724,6 +4731,7 @@ app.get("/api/gbp/locations", async (req, res) => {
         console.error("GBP location fetch error:", msg);
       }
     }
+    gbpLocationsCache = { locations: allLocations, fetchedAt: Date.now() };
     res.json({ locations: allLocations });
   } catch (e) {
     const status = e.response?.status;
