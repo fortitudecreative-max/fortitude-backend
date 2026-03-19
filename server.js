@@ -50,7 +50,7 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.get("/api/health", (req, res) => res.json({ status: "ok", ts: Date.now() }));
 
 // All /api/* routes require a valid Supabase session (except /api/health above)
-app.use("/api", (req, res, next) => { if (["/rb2b-webhook", "/snitcher-webhook"].includes(req.path)) return next(); return requireAuth(req, res, next); });
+app.use("/api", (req, res, next) => { if (["/rb2b-webhook", "/snitcher-webhook", "/gbp/oauth/start", "/gbp/oauth/callback"].includes(req.path)) return next(); return requireAuth(req, res, next); });
 
 // ─── CLIENTS ────────────────────────────────────────────────────
 app.get("/api/clients", async (req, res) => {
