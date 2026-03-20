@@ -1755,6 +1755,8 @@ app.delete("/api/clients/:clientId/keywords/:id", requireAuth, async (req, res) 
 app.get("/api/keywords/queue/:clientId", async (req, res) => {
   const { clientId } = req.params;
   const month = new Date().toISOString().slice(0, 7);
+  // Delete used rows first so they don't accumulate
+  await supabase.from("client_keyword_queue").delete().eq("client_id", clientId).eq("used", true);
   const { data, error } = await supabase.from("client_keyword_queue")
     .select("*").eq("client_id", clientId).eq("month", month)
     .order("source", { ascending: false });
