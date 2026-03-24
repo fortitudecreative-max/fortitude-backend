@@ -603,14 +603,9 @@ app.post("/api/content/generate", async (req, res) => {
     const internalLinksPrompt = internalPages.length > 0
       ? `\n\nINTERNAL LINKS — COPY URLS EXACTLY AS LISTED BELOW (Required):\n\nCRITICAL: You MUST use URLs copied character-for-character from the lists below. Do NOT construct, guess, shorten, or invent any URL. Do NOT use the root domain or homepage. If a URL looks unusual, use it anyway — these are the real live URLs pulled directly from the website.\n\nAvailable published blog posts (use up to 3):\n${blogPosts.map(p => `  [BLOG] Title: "${p.title}" | URL: ${p.url}`).join("\n") || "  (none yet — use service pages only)"}\n\nAvailable service/other pages (use exactly 1):\n${servicePages.map(p => `  [PAGE] Title: "${p.title}" | URL: ${p.url}`).join("\n") || "  (none available)"}\n\n${contactPage ? `Contact/quote page (use exactly 1):\n  [CONTACT] Title: "${contactPage.title}" | URL: ${contactPage.url}` : ""}\n\nInternal linking rules:\n1. BLOG POSTS: Link to up to 3 blog posts from the [BLOG] list on complementary topics. NEVER link to a post with the same or overlapping keyword (keyword cannibalization). Copy the URL exactly.\n2. SERVICE PAGE: Link to exactly 1 page from the [PAGE] list. Copy the URL exactly. NEVER use the root domain or homepage.\n3. CONTACT PAGE: Include exactly 1 CTA link using the [CONTACT] URL copied exactly (e.g. anchor text: "contact us today", "schedule a free estimate").\n4. If no blog posts exist, use 2 service pages + 1 contact page.\n5. NEVER fabricate a URL. Only use URLs explicitly listed above.`
       : "";
-
-    const externalLinksPrompt = `\n\nEXTERNAL LINKS — OUTBOUND LINKING RULES:
-Include 1-2 external links to specific, relevant pages on high-authority websites. Follow these rules strictly:
-1. Link to a SPECIFIC PAGE — a real article, guide, stat page, or resource — not a homepage or root domain. The page must be directly relevant to the topic of this post.
-2. The source can be any high-authority site: government (.gov), major industry associations, well-known publications (Forbes, HBR, Entrepreneur, etc.), or recognized research organizations. Match the source to the industry — do not use off-topic domains just because they are authoritative.
-3. Only use a URL you are genuinely confident exists from your training data. If you are not certain a specific page URL is real, skip the external link entirely — do NOT fall back to a homepage, do NOT construct a plausible-looking slug, do NOT fabricate.
-4. Reference the source naturally inline (e.g., "According to Forbes..." or "The EPA reports...") with anchor text that describes the content — not "click here" or a bare URL.
-5. NEVER invent statistics, studies, or citations. Every fact you cite must be something you are confident is accurate from your training data — not fabricated to justify including a link.`;
+    const externalLinks = await fetchExternalLinks(keyword, industry);
+    const externalLinksPrompt = buildExternalLinksPrompt(externalLinks);
+    console.log(`[ExternalLinks] Found ${externalLinks.length} verified links for "${keyword}"`);
 
     // Build AI personality block
   const buildPersonalityPrompt = (personality) => {
@@ -1916,6 +1911,91 @@ app.put("/api/schedule/:clientId", async (req, res) => {
 // ── Existing content deduplication ──────────────────────────────────────────
 // Fetches all existing page/post titles and slugs from WP + Supabase so
 // the generator can avoid duplicating them.
+// ── External link fetcher ─────────────────────────────────────────────────────
+// Searches DuckDuckGo for real, verifiable URLs relevant to the keyword+industry,
+// HEAD-checks each one, and returns up to 2 working links with titles.
+async function fetchExternalLinks(keyword, industry) {
+  const results = [];
+  // Authoritative domains to prefer by industry
+  const domainHints = {
+    hvac: ["energy.gov", "energystar.gov", "acca.org", "ashrae.org"],
+    plumbing: ["epa.gov", "awwa.org", "phccweb.org"],
+    electrical: ["nfpa.org", "epa.gov", "energy.gov"],
+    roofing: ["nrca.net", "ibhs.org", "fema.gov"],
+    default: ["energy.gov", "epa.gov", "fema.gov", "thisoldhouse.com", "familyhandyman.com"],
+  };
+  const industryKey = Object.keys(domainHints).find(k => (industry || "").toLowerCase().includes(k)) || "default";
+  const preferred = domainHints[industryKey];
+
+  // Build search queries — one targeted, one broader
+  const queries = [
+    `${keyword} ${industry} site:${preferred[0]} OR site:${preferred[1]}`,
+    `${keyword} home service tips`,
+  ];
+
+  for (const q of queries) {
+    if (results.length >= 2) break;
+    try {
+      // DuckDuckGo HTML search — no API key required
+      const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+      const res = await axios.get(searchUrl, {
+        timeout: 6000,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; FortitudeBot/1.0)" },
+      });
+      const html = res.data;
+      // Extract result URLs from DuckDuckGo HTML
+      const urlMatches = [...html.matchAll(/href="(https?:\/\/[^"&]+)"/g)]
+        .map(m => m[1])
+        .filter(u => {
+          try { const h = new URL(u).hostname.replace("www.", ""); return preferred.some(d => h.includes(d)) || h.includes(".gov") || h.includes(".org"); }
+          catch { return false; }
+        })
+        .filter(u => !u.includes("duckduckgo") && !u.includes("google") && u.length < 200);
+
+      for (const url of urlMatches) {
+        if (results.length >= 2) break;
+        if (results.some(r => r.url === url)) continue;
+        try {
+          // HEAD check to verify URL actually resolves
+          const check = await axios.head(url, { timeout: 4000, maxRedirects: 3, validateStatus: s => s < 400 });
+          if (check.status < 400) {
+            // Extract a readable title from the URL path
+            const path = new URL(url).pathname.replace(/\//g, " ").replace(/-/g, " ").replace(/\.[^.]+$/, "").trim();
+            const title = path.length > 5 ? path : new URL(url).hostname.replace("www.", "");
+            results.push({ url, title, domain: new URL(url).hostname.replace("www.", "") });
+            console.log(`[ExternalLinks] Verified: ${url}`);
+          }
+        } catch (e) {
+          console.log(`[ExternalLinks] Dead link skipped: ${url}`);
+        }
+      }
+    } catch (e) {
+      console.log(`[ExternalLinks] Search failed for "${q}":`, e.message);
+    }
+  }
+
+  return results;
+}
+
+// Builds the external links prompt block from verified links (or falls back to a strict no-hallucination instruction)
+function buildExternalLinksPrompt(externalLinks) {
+  if (externalLinks && externalLinks.length > 0) {
+    const linkList = externalLinks.map(l => `  URL: ${l.url}\n  Domain: ${l.domain}`).join("\n\n");
+    return `\n\nEXTERNAL LINKS — USE THESE EXACT VERIFIED URLS (Required):
+The following URLs have been verified as live and working. You MUST include 1-2 of these as external links in the post. Copy each URL character-for-character — do NOT modify, shorten, or reconstruct them.
+
+${linkList}
+
+Rules:
+1. Use the URL exactly as listed above — do not alter it in any way.
+2. Reference the source naturally inline with descriptive anchor text (e.g. "According to the EPA..." or "the Department of Energy notes...").
+3. Do NOT add any external links beyond those listed above.
+4. Do NOT fabricate any URLs or statistics.`;
+  }
+  // Fallback: no verified links found — instruct Claude to skip external links entirely
+  return `\n\nEXTERNAL LINKS: Do not include any external links in this post. No outbound URLs should appear in the content.`;
+}
+
 async function fetchExistingContent(wordpressUrl, clientId) {
   const existing = []; // [{ title, slug }]
 
@@ -2832,16 +2912,9 @@ const publishPostForClient = async (client, keyword) => {
     const internalLinksPrompt = internalPages.length > 0
       ? ("\n\nINTERNAL LINKS — COPY URLS EXACTLY AS LISTED BELOW (Required):\n\nCRITICAL: You MUST use URLs copied character-for-character from the lists below. Do NOT construct, guess, shorten, or invent any URL. Do NOT use the root domain or homepage. If a URL looks unusual, use it anyway — these are the real live URLs pulled directly from the website.\n\nAvailable published blog posts (use up to 3):\n" + (blogPosts.map(p => "  [BLOG] Title: \"" + p.title + "\" | URL: " + p.url).join("\n") || "  (none yet — use service pages only)") + "\n\nAvailable service/other pages (use exactly 1):\n" + (servicePages.map(p => "  [PAGE] Title: \"" + p.title + "\" | URL: " + p.url).join("\n") || "  (none available)") + (contactPage ? "\n\nContact/quote page (use exactly 1):\n  [CONTACT] Title: \"" + contactPage.title + "\" | URL: " + contactPage.url : "") + "\n\nInternal linking rules:\n1. BLOG POSTS: Link to up to 3 blog posts from the [BLOG] list on complementary topics. NEVER link to a post with the same or overlapping keyword (keyword cannibalization). Copy the URL exactly.\n2. SERVICE PAGE: Link to exactly 1 page from the [PAGE] list. Copy the URL exactly. NEVER use the root domain or homepage.\n3. CONTACT PAGE: Include exactly 1 CTA link using the [CONTACT] URL copied exactly (e.g. anchor text: \"contact us today\", \"schedule a free estimate\").\n4. If no blog posts exist, use 2 service pages + 1 contact page.\n5. NEVER fabricate a URL. Only use URLs explicitly listed above.")
       : "";
-
-    const externalLinksPrompt = `
-
-EXTERNAL LINKS — OUTBOUND LINKING RULES:
-Include 1-2 external links to specific, relevant pages on high-authority websites. Follow these rules strictly:
-1. Link to a SPECIFIC PAGE — a real article, guide, stat page, or resource — not a homepage or root domain. The page must be directly relevant to the topic of this post.
-2. The source can be any high-authority site: government (.gov), major industry associations, well-known publications (Forbes, HBR, Entrepreneur, etc.), or recognized research organizations. Match the source to the industry — do not use off-topic domains just because they are authoritative.
-3. Only use a URL you are genuinely confident exists from your training data. If you are not certain a specific page URL is real, skip the external link entirely — do NOT fall back to a homepage, do NOT construct a plausible-looking slug, do NOT fabricate.
-4. Reference the source naturally inline (e.g., "According to Forbes..." or "The EPA reports...") with anchor text that describes the content — not "click here" or a bare URL.
-5. NEVER invent statistics, studies, or citations. Every fact you cite must be something you are confident is accurate from your training data — not fabricated to justify including a link.`;
+    const externalLinks = await fetchExternalLinks(keyword, client.industry);
+    const externalLinksPrompt = buildExternalLinksPrompt(externalLinks);
+    console.log(`[Scheduler ExternalLinks] Found ${externalLinks.length} verified links for "${keyword}"`);
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
