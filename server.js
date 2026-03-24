@@ -673,7 +673,7 @@ The faqs array must have exactly 4 entries. Questions should be the kind of thin
 Return only the JSON, no other text.`;
 
     const message = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 4000,
       messages: [{ role: "user", content: userPrompt }],
       system: systemPrompt,
@@ -694,7 +694,7 @@ Return only the JSON, no other text.`;
         console.log(`[Meta] Out of 120-140 range (${post.metaDescription.length}) — retry ${metaAttempts}: "${post.metaDescription}"`);
         try {
           const metaRetry = await client.messages.create({
-            model: "claude-sonnet-4-20250514",
+            model: "claude-sonnet-4-5",
             max_tokens: 100,
             messages: [{ role: "user", content: `Rewrite this meta description to be between 120-140 characters total including spaces. It must include the keyword "${keyword}" and convey the same meaning. Count every character carefully — must be at least 120 and no more than 140. Return ONLY the new meta description text, no quotes, no explanation.
 
@@ -1563,7 +1563,7 @@ async function generateResearchKeywords(client, count, excludeSet) {
   const existingList = [...excludeSet, ...libKeywords.map(k => k.keyword.toLowerCase())].slice(0, 30).join(", ");
   try {
     const msg = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 1000,
       messages: [{ role: "user", content: `You are an SEO expert. Generate ${stillNeeded} high-intent blog keyword phrases for a ${client.industry_tags || client.industry} business called "${client.name}"${client.service_area ? ` located in ${client.service_area}` : ""}${client.domain ? ` with website ${client.domain}` : ""}. Focus on: local service keywords, how-to guides, cost/pricing, emergency services, and comparison keywords. Do NOT use any of these already-used keywords: ${existingList}. Respond with ONLY a raw JSON array of ${stillNeeded} strings. No markdown, no explanation.` }],
     });
@@ -1596,7 +1596,7 @@ async function generateGapKeywords(client, count, excludeSet) {
   for (const prompt of prompts) {
     try {
       const msg = await anthropic.messages.create({
-        model: "claude-sonnet-4-20250514", max_tokens: 800,
+        model: "claude-sonnet-4-5", max_tokens: 800,
         messages: [{ role: "user", content: prompt }],
       });
       const tb = msg.content.find(b => b.type === "text");
@@ -1807,7 +1807,7 @@ app.post("/api/keywords/queue/gap-single", async (req, res) => {
     const competitors = client.competitors || [];
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 300,
       messages: [{
         role: "user",
@@ -2303,7 +2303,7 @@ const verifyPublishedPost = async (liveUrl, { title, keyword, metaDescription, w
     // reviewText is derived from isolated post content only (nav/header/footer stripped)
     const reviewText = bodyText.slice(0, 12000);
     const msg = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 600,
       messages: [{ role: "user", content: `You are a QA reviewer for a home service company blog. Review this published blog post and return ONLY valid JSON.
 
@@ -2525,7 +2525,7 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
         : `Rewrite to be between 120-140 characters total including spaces while keeping the keyphrase "${keyword}". Count carefully. Return ONLY the new meta description text, no quotes.\n\n"${currentMeta}"`;
       try {
         const msg = await anthropic.messages.create({
-          model: "claude-sonnet-4-20250514", max_tokens: 300,
+          model: "claude-sonnet-4-5", max_tokens: 300,
           messages: [{ role: "user", content: metaPrompt }]
         });
         const newMeta = msg.content[0].text.trim().replace(/^["']|["']$/g, "");
@@ -2547,7 +2547,7 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
         : `Rewrite this SEO title so it STARTS WITH the exact keyphrase "${keyword}". Keep the post topic clear. Max 60 characters. Return ONLY the title text, no suffix, no quotes.\n\nCurrent: "${currentTitle.replace(/ - %%sitename%%/, "")}"`;
       try {
         const msg = await anthropic.messages.create({
-          model: "claude-sonnet-4-20250514", max_tokens: 200,
+          model: "claude-sonnet-4-5", max_tokens: 200,
           messages: [{ role: "user", content: titlePrompt }]
         });
         const newTitle = msg.content[0].text.trim().replace(/^["']|["']$/g, "").replace(/ - %%sitename%%$/, "") + " - %%sitename%%";
@@ -2588,7 +2588,7 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
         const bodyHtml    = schemaMatch ? currentContent.slice(0, schemaMatch.index) : currentContent;
 
         const msg = await anthropic.messages.create({
-          model: "claude-sonnet-4-20250514", max_tokens: 6000,
+          model: "claude-sonnet-4-5", max_tokens: 6000,
           system: `You are an expert SEO blog editor. Fix ONLY the listed Yoast SEO issues. Preserve all existing links, images, and post structure. Output ONLY the corrected HTML body — no preamble, no markdown, no explanation.`,
           messages: [{ role: "user", content: `Fix these Yoast SEO issues:\n\n${contentFixList.join("\n\n")}${escalation}\n\nPost keyword: "${keyword}"\n\nCurrent HTML:\n---\n${bodyHtml.slice(0, 24000)}\n---\n\nReturn ONLY the corrected HTML body.` }]
         });
@@ -2688,7 +2688,7 @@ const qaRepairLoop = async (wpPostId, liveUrl, qaContext, wpBaseUrl, authHeaders
     let rewrittenHtml = "";
     try {
       const msg = await anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-5",
         max_tokens: 4000,
         system: `You are an expert blog editor for a home service company. You receive a published blog post that failed quality checks and must fix ALL listed issues while preserving the post's full length, keyword focus, and professional tone.
 
@@ -2809,7 +2809,7 @@ Include 1-2 external links to specific, relevant pages on high-authority website
 5. NEVER invent statistics, studies, or citations. Every fact you cite must be something you are confident is accurate from your training data — not fabricated to justify including a link.`;
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 4000,
       system: `You are a professional SEO content writer specializing in home service companies. ${client.brand_voice ? `Brand voice: ${client.brand_voice}` : ""}
 
@@ -3528,7 +3528,7 @@ Rules:
 - meta_description: 150-160 chars, keyword + location if in slug + CTA
 - focus_keyword: best single phrase from slug/title, lowercase
 Return: { "fixes": { "<issue_id>": "<fixValue>" } }`;
-        const msg = await anthropic.messages.create({ model:"claude-sonnet-4-20250514", max_tokens:500,
+        const msg = await anthropic.messages.create({ model:"claude-sonnet-4-5", max_tokens:500,
           messages:[{role:"user",content:fixPrompt}] });
         const { fixes } = JSON.parse(msg.content[0].text.trim().replace(/```json|```/g,"").trim());
         issues.forEach(i => { if (fixes[i.id]) { i.fixValue = fixes[i.id]; i.suggestion = fixes[i.id]; } });
@@ -4083,7 +4083,7 @@ app.post("/api/seo/fix", async (req, res) => {
       const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
       try {
         const msg = await anthropic.messages.create({
-          model: "claude-sonnet-4-20250514", max_tokens: maxTokens,
+          model: "claude-sonnet-4-5", max_tokens: maxTokens,
           messages: [{ role: "user", content: prompt }]
         });
         return msg.content[0].text.trim().replace(/^```[\s\S]*?\n|```$/g, "").trim();
