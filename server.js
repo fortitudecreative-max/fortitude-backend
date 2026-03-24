@@ -1969,6 +1969,29 @@ function selectFeaturedImage(images, keywordWords = []) {
   if (!images || images.length === 0) return null;
   const COOLDOWN = 10;
 
+  // Build a meaningful word list from the keyword - skip stop words and short words
+  const stopWords = new Set(["the","and","for","with","from","that","this","your","have","will","how","what","when","why","are","its","into","about","can","does","our","their","which","been","they","you","not","but","was"]);
+  const meaningful = keywordWords.filter(w => w.length > 3 && !stopWords.has(w));
+
+  // Score an image by how well its category + description match the keyword
+  function scoreImage(img) {
+    if (meaningful.length === 0) return 0;
+    const searchText = (
+      (img.category || "") + " " +
+      (img.description || "")
+    ).toLowerCase();
+    let score = 0;
+    for (const word of meaningful) {
+      if (searchText.includes(word)) score += 2;
+    }
+    // Bonus: category alone matches (stronger signal than description)
+    const cat = (img.category || "").toLowerCase();
+    for (const word of meaningful) {
+      if (cat.includes(word)) score += 1;
+    }
+    return score;
+  }
+
   // Sort by last_used_at desc to find the most recently used images
   const recentlyUsed = [...images]
     .filter(img => img.last_used_at)
@@ -1976,27 +1999,39 @@ function selectFeaturedImage(images, keywordWords = []) {
     .slice(0, COOLDOWN)
     .map(img => img.id);
 
-  // Available = not in the cooldown window
-  const available = images.filter(img => !recentlyUsed.includes(img.id));
-
-  // Use available pool; fall back to least-recently-used if all on cooldown
-  const pool = available.length > 0 ? available : images;
-
-  // Within the pool, try keyword match against category + description
-  const match = pool.find(img => {
-    const searchText = ((img.category || "") + " " + (img.description || "")).toLowerCase();
-    return keywordWords.some(w => w.length > 3 && searchText.includes(w));
+  // Score ALL images regardless of cooldown first - relevance beats rotation
+  const scored = images.map(img => ({ img, score: scoreImage(img), onCooldown: recentlyUsed.includes(img.id) }));
+  scored.sort((a, b) => {
+    // Primary: relevance score descending
+    if (b.score !== a.score) return b.score - a.score;
+    // Secondary: prefer not on cooldown
+    if (a.onCooldown !== b.onCooldown) return a.onCooldown ? 1 : -1;
+    // Tertiary: least recently used
+    if (!a.img.last_used_at) return -1;
+    if (!b.img.last_used_at) return 1;
+    return new Date(a.img.last_used_at) - new Date(b.img.last_used_at);
   });
 
-  // Otherwise pick least-used, then oldest last_used_at
-  const sorted = [...pool].sort((a, b) => {
+  const best = scored[0];
+
+  // Only use this image if it has at least 1 relevance point.
+  // If nothing is relevant, fall back to rotation (cooldown-aware, least-used).
+  if (best && best.score > 0) {
+    console.log(`[Image] Selected by relevance (score ${best.score}): "${best.img.category}" — "${best.img.description}"`);
+    return best.img;
+  }
+
+  // No relevant image found - fall back to cooldown-aware rotation
+  console.log("[Image] No relevant image found - falling back to rotation");
+  const available = images.filter(img => !recentlyUsed.includes(img.id));
+  const pool = available.length > 0 ? available : images;
+  const fallback = [...pool].sort((a, b) => {
     if ((a.times_used || 0) !== (b.times_used || 0)) return (a.times_used || 0) - (b.times_used || 0);
     if (!a.last_used_at) return -1;
     if (!b.last_used_at) return 1;
     return new Date(a.last_used_at) - new Date(b.last_used_at);
   });
-
-  return match || sorted[0];
+  return fallback[0];
 }
 
 // Increments usage counter + timestamps image after selection.
