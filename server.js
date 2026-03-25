@@ -544,6 +544,21 @@ app.get("/api/posts", async (req, res) => {
   res.json({ posts: data });
 });
 
+app.put("/api/posts/:id", requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const { title, content, slug, meta_description, word_count } = req.body;
+  const updates = {};
+  if (title !== undefined) updates.title = title;
+  if (content !== undefined) updates.content = content;
+  if (slug !== undefined) updates.slug = slug;
+  if (meta_description !== undefined) updates.meta_description = meta_description;
+  if (word_count !== undefined) updates.word_count = word_count;
+  updates.updated_at = new Date().toISOString();
+  const { error } = await supabase.from("posts").update(updates).eq("id", id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
+
 // ─── CONTENT GENERATION ──────────────────────────────────────────
 
 // ─── ONE-TIME MIGRATION: add ai_personality column ────────────────────────────
@@ -2887,7 +2902,7 @@ Return ONLY the corrected HTML body. Fix every issue listed above. Preserve all 
 };
 
 
-const publishPostForClient = async (client, keyword) => {
+const publishPostForClient = async (client, keyword, draftPost = null) => {
   try {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -2925,6 +2940,21 @@ const publishPostForClient = async (client, keyword) => {
     const externalLinksPrompt = buildExternalLinksPrompt(externalLinks);
     console.log(`[Scheduler ExternalLinks] Found ${externalLinks.length} verified links for "${keyword}"`);
 
+    // If a pre-generated draft was passed in, skip AI generation entirely
+    let post;
+    if (draftPost) {
+      console.log(`[Scheduler] Using pre-generated draft for "${keyword}" (post id: ${draftPost.id})`);
+      post = {
+        id: draftPost.id,
+        title: draftPost.title,
+        content: draftPost.content,
+        slug: draftPost.slug,
+        metaDescription: draftPost.meta_description,
+        wordCount: draftPost.word_count || 0,
+        faqs: [],
+        steps: [],
+      };
+    } else {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
       max_tokens: 4000,
@@ -2966,6 +2996,7 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
     // Safety net: convert any markdown that slipped into the content
     post.content = markdownToHtml(post.content);
 
+    } // end else (AI generation)
     // Build all schema (Article + HowTo + FAQPage) + visible HTML sections
     const { appendHtml: schAppendHtml, schemaHtml: schSchemaHtml, schemaTypes: schTypes } = buildSchemaBlock({
       title: post.title,
@@ -3109,10 +3140,18 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
       }
     } catch (e) { console.log("[Scheduler] Yoast meta error:", e.message); }
 
-    await supabase.from("posts").insert([{
-      client_id: client.id, keyword, title: post.title, meta_description: post.metaDescription,
-      slug: post.slug, content: post.content, word_count: post.wordCount, status: "published", published_at: new Date().toISOString()
-    }]);
+    if (draftPost?.id) {
+      // Update the existing draft row to published
+      await supabase.from("posts").update({
+        title: post.title, content: post.content, meta_description: post.metaDescription,
+        slug: post.slug, status: "published", published_at: new Date().toISOString()
+      }).eq("id", draftPost.id);
+    } else {
+      await supabase.from("posts").insert([{
+        client_id: client.id, keyword, title: post.title, meta_description: post.metaDescription,
+        slug: post.slug, content: post.content, word_count: post.wordCount, status: "published", published_at: new Date().toISOString()
+      }]);
+    }
     const { data: c } = await supabase.from("clients").select("posts_published, next_keyword_index").eq("id", client.id).single();
     await supabase.from("clients").update({ posts_published: (c?.posts_published || 0) + 1, next_keyword_index: (c?.next_keyword_index || 0) + 1 }).eq("id", client.id);
 
@@ -3210,8 +3249,8 @@ const scheduleDailyPosts = async () => {
       const { data: todayJobs } = await supabase.from("scheduled_jobs")
         .select("id").eq("client_id", client.id)
         .gte("scheduled_time", todayStart)
-        .eq("status", "published");
-      if (todayJobs?.length > 0) { console.log(`Skipping ${client.name} — already published today`); continue; }
+        .in("status", ["pending", "running", "published"]);
+      if (todayJobs?.length > 0) { console.log(`Skipping ${client.name} — scheduler already queued/published today`); continue; }
 
       const month = new Date().toISOString().slice(0, 7);
       const { data: queueKeywords } = await supabase.from("client_keyword_queue")
@@ -3231,6 +3270,18 @@ const scheduleDailyPosts = async () => {
         const idx = (client.next_keyword_index || 0) % libKeywords.length;
         keyword = libKeywords[idx].keyword;
       }
+
+      // Check if there's a pre-generated draft for this keyword
+      let draftPost = null;
+      try {
+        const { data: existingDraft } = await supabase.from("posts")
+          .select("*").eq("client_id", client.id).eq("keyword", keyword).eq("status", "draft")
+          .order("created_at", { ascending: false }).limit(1);
+        if (existingDraft?.length > 0) {
+          draftPost = existingDraft[0];
+          console.log(`[Scheduler] Found pre-generated draft for "${keyword}" — will use instead of regenerating`);
+        }
+      } catch(e) { console.log("[Scheduler] Draft lookup error:", e.message); }
 
       const startHour = client.schedule_start_hour || 9;
       const endHour = client.schedule_end_hour || 12;
@@ -3258,7 +3309,7 @@ const scheduleDailyPosts = async () => {
         setTimeout(async () => {
           try {
             await supabase.from("scheduled_jobs").update({ status: "running" }).eq("id", job.id);
-            const wpResult = await publishPostForClient(client, keyword);
+            const wpResult = await publishPostForClient(client, keyword, draftPost);
             const wpPostId = wpResult.id || wpResult;
             const wpPostUrl = wpResult.link || '';
             await supabase.from("scheduled_jobs").update({ status: "published", published_at: new Date().toISOString(), wp_post_id: wpPostId, published_url: wpPostUrl }).eq("id", job.id);
@@ -3273,7 +3324,7 @@ const scheduleDailyPosts = async () => {
           }
         }, msUntilPublish);
       } else {
-        await publishPostForClient(client, keyword);
+        await publishPostForClient(client, keyword, draftPost);
         await supabase.from("scheduled_jobs").update({ status: "published", published_at: new Date().toISOString() }).eq("id", job.id);
       }
     } catch (err) {
