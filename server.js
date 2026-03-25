@@ -931,8 +931,32 @@ app.post("/api/publish/wordpress", async (req, res) => {
     }
 
     // ── Detect SEO capabilities: Fortitude plugin + Yoast edition ────────────
-    let seoCaps = { yoast: "none", fortitudePlugin: false, canWriteSeoMeta: false };
-    try { seoCaps = await detectSeoCapabilities(wordpressUrl, authHeaders, clientId || null); } catch(e) {}
+    // Use cached caps from Supabase if available (set by detect-seo-caps or prior publish).
+    // Only re-probe live if no cache exists — avoids WP probe failures breaking every publish.
+    let seoCaps = { yoast: "none", fortitudePlugin: false, canWriteSeoMeta: false, restMetaKeys: false };
+    try {
+      if (clientId) {
+        const { data: cachedClient } = await supabase.from("clients")
+          .select("yoast_edition,yoast_rest_meta_keys,fortitude_plugin,seo_caps_detected_at")
+          .eq("id", clientId).single();
+        if (cachedClient?.seo_caps_detected_at) {
+          seoCaps = {
+            yoast: cachedClient.yoast_edition || "none",
+            fortitudePlugin: cachedClient.fortitude_plugin || false,
+            restMetaKeys: cachedClient.yoast_rest_meta_keys || false,
+            canWriteSeoMeta: !!(cachedClient.fortitude_plugin || cachedClient.yoast_rest_meta_keys || cachedClient.yoast_edition),
+          };
+          console.log(`[Yoast] Using cached caps: edition=${seoCaps.yoast}, fortitudePlugin=${seoCaps.fortitudePlugin}, restKeys=${seoCaps.restMetaKeys}`);
+        } else {
+          seoCaps = await detectSeoCapabilities(wordpressUrl, authHeaders, clientId);
+          console.log(`[Yoast] No cache — probed live: edition=${seoCaps.yoast}, fortitudePlugin=${seoCaps.fortitudePlugin}`);
+        }
+      } else {
+        seoCaps = await detectSeoCapabilities(wordpressUrl, authHeaders, null);
+      }
+    } catch(e) {
+      console.log("[Yoast] Cap detection error:", e.message);
+    }
     const yoastEdition = seoCaps.yoast;
     console.log(`[Yoast] Caps: edition=${yoastEdition}, fortitudePlugin=${seoCaps.fortitudePlugin}, canWrite=${seoCaps.canWriteSeoMeta}`);
 
@@ -1006,7 +1030,9 @@ app.post("/api/publish/wordpress", async (req, res) => {
           yoastWriteSuccess = true;
           yoastWriteMethod = "rest_fallback";
           console.log("[SEO] Yoast meta written via REST fallback");
-        } catch(e) {}
+        } catch(e) {
+          console.log("[SEO] PATH C REST fallback also failed:", e.response?.data || e.message);
+        }
       }
 
       if (!yoastWriteSuccess) {
