@@ -643,7 +643,7 @@ CRITICAL KEYWORD RULES — these are non-negotiable:
 1. TITLE: The title MUST contain the keyword "${keyword}" or a natural variation. Natural variations allowed: you may swap or add articles and pronouns (a/an/the/your/my/this/that). You may NOT reorder the core words, drop core words, or substitute synonyms. Example: "how to unclog a shower drain" and "how to unclog your shower drain" are both valid for "how to unclog shower drain."
 2. BODY: The keyword or a natural variation must appear at least 3 times — once in the first paragraph, once in an <h2>, and at least once more naturally in the text.
 3. META DESCRIPTION: Must contain the keyword or a natural variation.
-4. SLUG: Must be derived directly from "${keyword}" (e.g. "${keyword.toLowerCase().replace(/\s+/g, \"-\")}").
+4. SLUG: Must be derived directly from "${keyword}" using lowercase words joined by hyphens.
 5. Do NOT drift to a related but different topic. The entire post must answer the question or address the topic of "${keyword}" directly.
 ${internalLinksPrompt}
 ${externalLinksPrompt}
