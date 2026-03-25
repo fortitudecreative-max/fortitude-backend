@@ -1240,29 +1240,6 @@ app.delete("/api/schedule/:jobId", requireAuth, async (req, res) => {
   }
 });
 
-// ── One-time backfill: insert published rows into scheduled_jobs ──────────────
-app.post("/api/admin/backfill-published", requireAuth, async (req, res) => {
-  const { rows } = req.body; // [{ client_id, keyword, wp_post_id, published_url, scheduled_time }]
-  if (!rows || !Array.isArray(rows)) return res.status(400).json({ error: "rows array required" });
-  const results = [];
-  for (const row of rows) {
-    // Check if already exists
-    const { data: existing } = await supabase.from("scheduled_jobs")
-      .select("id").eq("wp_post_id", row.wp_post_id).eq("client_id", row.client_id).single();
-    if (existing) { results.push({ ...row, action: "skipped" }); continue; }
-    const { error } = await supabase.from("scheduled_jobs").insert([{
-      client_id: row.client_id,
-      keyword: row.keyword,
-      scheduled_time: row.scheduled_time || new Date().toISOString(),
-      status: "published",
-      wp_post_id: row.wp_post_id,
-      published_url: row.published_url,
-    }]);
-    results.push({ ...row, action: error ? "error: " + error.message : "inserted" });
-  }
-  res.json({ results });
-});
-
 app.get("/api/keywords/gap", async (req, res) => {
   const { domain, competitor1, competitor2, database = "us" } = req.query;
   if (!domain || !competitor1) return res.status(400).json({ error: "domain and competitor1 are required" });
