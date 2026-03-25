@@ -640,10 +640,10 @@ This keeps content valuable for SEO while protecting the business's service reve
     const userPrompt = `Write a complete SEO blog post for a ${industry} company called "${clientName || "our company"}" targeting the keyword: "${keyword}"
 
 CRITICAL KEYWORD RULES — these are non-negotiable:
-1. TITLE: The title MUST contain the exact phrase "${keyword}" verbatim, or every individual word from it. Do not paraphrase, reorder, or substitute synonyms. The title must be written around this exact keyword.
-2. BODY: The exact phrase "${keyword}" must appear at least 3 times in the body content — once in the first paragraph, once in an <h2>, and at least once more naturally in the text.
-3. META DESCRIPTION: Must contain the exact phrase "${keyword}" verbatim.
-4. SLUG: Must be derived directly from "${keyword}" (e.g. "${keyword.toLowerCase().replace(/\s+/g, "-")}").
+1. TITLE: The title MUST contain the keyword "${keyword}" or a natural variation. Natural variations allowed: you may swap or add articles and pronouns (a/an/the/your/my/this/that). You may NOT reorder the core words, drop core words, or substitute synonyms. Example: "how to unclog a shower drain" and "how to unclog your shower drain" are both valid for "how to unclog shower drain."
+2. BODY: The keyword or a natural variation must appear at least 3 times — once in the first paragraph, once in an <h2>, and at least once more naturally in the text.
+3. META DESCRIPTION: Must contain the keyword or a natural variation.
+4. SLUG: Must be derived directly from "${keyword}" (e.g. "${keyword.toLowerCase().replace(/\s+/g, \"-\")}").
 5. Do NOT drift to a related but different topic. The entire post must answer the question or address the topic of "${keyword}" directly.
 ${internalLinksPrompt}
 ${externalLinksPrompt}
@@ -651,9 +651,8 @@ ${existingContentPrompt}
 
 ${regenPrompt ? `\n\nIMPORTANT — The user has reviewed a previous draft and wants the following changes or new direction. Apply these fully:\n${regenPrompt}\n` : ""}Return your response as JSON with exactly this structure:
 {
-  "title": "SEO optimized blog post title — MUST contain the exact keyword phrase. STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
-  "metaDescription": "Meta description — MUST contain the exact keyword phrase. STRICT range: 120-140 characters total including spaces. Count character by character before submitting. Must be at least 120 and no more than 140 characters.",
-  "slug": "url-friendly-slug",
+  "title": "SEO optimized blog post title — MUST contain the keyword or a natural variation. STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully.",
+  "metaDescription": "Meta description — MUST contain the keyword or a natural variation. STRICT range: 120-140 characters total including spaces. Count character by character. Must be at least 120 and no more than 140 characters.",
   "content": "Full HTML only — NO markdown whatsoever. Use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <a> tags exclusively. Never use **, --, ##, or any markdown syntax. All bullet points must be <ul><li> HTML. All bold must be <strong>. Minimum 800 words.",
   "wordCount": estimated word count as integer,
   "faqs": [
@@ -2942,16 +2941,16 @@ This protects the business's service revenue while keeping content SEO-valuable.
       messages: [{ role: "user", content: `Write a complete SEO blog post for "${client.name}" targeting the keyword: "${keyword}"
 
 CRITICAL KEYWORD RULES — these are non-negotiable:
-1. TITLE: Must contain the exact phrase "${keyword}" verbatim. Do not paraphrase or reorder words.
-2. BODY: The exact phrase "${keyword}" must appear at least 3 times — once in the first paragraph, once in an <h2>, and at least once more naturally in the text.
-3. META DESCRIPTION: Must contain the exact phrase "${keyword}" verbatim.
+1. TITLE: Must contain the keyword "${keyword}" or a natural variation. Natural variations allowed: you may swap or add articles and pronouns (a/an/the/your/my/this/that). Do NOT reorder core words, drop core words, or substitute synonyms.
+2. BODY: The keyword or a natural variation must appear at least 3 times — once in the first paragraph, once in an <h2>, and at least once more naturally in the text.
+3. META DESCRIPTION: Must contain the keyword or a natural variation.
 4. SLUG: Must be derived directly from "${keyword}".
 5. Do NOT drift to a related but different topic. The entire post must directly address "${keyword}".
 ${internalLinksPrompt}${externalLinksPrompt}${existingContentPrompt}
 
 Return ONLY valid JSON with these exact fields:
-- title: SEO title — MUST contain the exact keyword phrase. STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
-- metaDescription: meta description — MUST contain the exact keyword phrase. STRICT range: 120-140 characters total including spaces. Count character by character. Must be at least 120 and no more than 140.
+- title: SEO title — MUST contain the keyword or a natural variation. STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
+- metaDescription: meta description — MUST contain the keyword or a natural variation. STRICT range: 120-140 characters total including spaces.
 - slug: URL slug (lowercase, hyphens) derived from the keyword
 - content: pure HTML body using <h2>, <h3>, <p>, <ul>, <li>, <strong>, <a> tags ONLY. NO markdown whatsoever.
 - wordCount: integer word count
