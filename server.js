@@ -638,14 +638,21 @@ This keeps content valuable for SEO while protecting the business's service reve
 
     const isHowToKeyword = /how.?to|step|guide|diy|install|fix|replace|repair|maintain|clean|troubleshoot/i.test(keyword);
     const userPrompt = `Write a complete SEO blog post for a ${industry} company called "${clientName || "our company"}" targeting the keyword: "${keyword}"
+
+CRITICAL KEYWORD RULES — these are non-negotiable:
+1. TITLE: The title MUST contain the exact phrase "${keyword}" verbatim, or every individual word from it. Do not paraphrase, reorder, or substitute synonyms. The title must be written around this exact keyword.
+2. BODY: The exact phrase "${keyword}" must appear at least 3 times in the body content — once in the first paragraph, once in an <h2>, and at least once more naturally in the text.
+3. META DESCRIPTION: Must contain the exact phrase "${keyword}" verbatim.
+4. SLUG: Must be derived directly from "${keyword}" (e.g. "${keyword.toLowerCase().replace(/\s+/g, "-")}").
+5. Do NOT drift to a related but different topic. The entire post must answer the question or address the topic of "${keyword}" directly.
 ${internalLinksPrompt}
 ${externalLinksPrompt}
 ${existingContentPrompt}
 
 ${regenPrompt ? `\n\nIMPORTANT — The user has reviewed a previous draft and wants the following changes or new direction. Apply these fully:\n${regenPrompt}\n` : ""}Return your response as JSON with exactly this structure:
 {
-  "title": "SEO optimized blog post title — STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
-  "metaDescription": "Meta description — STRICT range: 120-140 characters total including spaces. Count character by character before submitting. Must be at least 120 and no more than 140 characters. Include the target keyword naturally.",
+  "title": "SEO optimized blog post title — MUST contain the exact keyword phrase. STRICT Yoast limit: must be between 50-60 characters total (including spaces). Count carefully. Shorter than 50 or longer than 60 characters will fail Yoast SEO.",
+  "metaDescription": "Meta description — MUST contain the exact keyword phrase. STRICT range: 120-140 characters total including spaces. Count character by character before submitting. Must be at least 120 and no more than 140 characters.",
   "slug": "url-friendly-slug",
   "content": "Full HTML only — NO markdown whatsoever. Use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <a> tags exclusively. Never use **, --, ##, or any markdown syntax. All bullet points must be <ul><li> HTML. All bold must be <strong>. Minimum 800 words.",
   "wordCount": estimated word count as integer,
@@ -2932,12 +2939,20 @@ CRITICAL CONTENT RULE: This blog content is for a professional home service comp
 - Use phrases like "a certified technician will...", "your pro will...", "call ${client.name} to..."
 - For how-to style posts, frame steps as "how to identify if you need X" or "what to expect when a pro fixes X" — not "how to fix X yourself"
 This protects the business's service revenue while keeping content SEO-valuable.`,
-      messages: [{ role: "user", content: `Write a complete SEO blog post for "${client.name}" targeting: "${keyword}"${internalLinksPrompt}${externalLinksPrompt}${existingContentPrompt}
+      messages: [{ role: "user", content: `Write a complete SEO blog post for "${client.name}" targeting the keyword: "${keyword}"
+
+CRITICAL KEYWORD RULES — these are non-negotiable:
+1. TITLE: Must contain the exact phrase "${keyword}" verbatim. Do not paraphrase or reorder words.
+2. BODY: The exact phrase "${keyword}" must appear at least 3 times — once in the first paragraph, once in an <h2>, and at least once more naturally in the text.
+3. META DESCRIPTION: Must contain the exact phrase "${keyword}" verbatim.
+4. SLUG: Must be derived directly from "${keyword}".
+5. Do NOT drift to a related but different topic. The entire post must directly address "${keyword}".
+${internalLinksPrompt}${externalLinksPrompt}${existingContentPrompt}
 
 Return ONLY valid JSON with these exact fields:
-- title: SEO title — STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
-- metaDescription: meta description — STRICT range: 120-140 characters total including spaces. Count character by character. Must be at least 120 and no more than 140.
-- slug: URL slug (lowercase, hyphens)
+- title: SEO title — MUST contain the exact keyword phrase. STRICT Yoast limit: 50-60 characters total including spaces. Count carefully.
+- metaDescription: meta description — MUST contain the exact keyword phrase. STRICT range: 120-140 characters total including spaces. Count character by character. Must be at least 120 and no more than 140.
+- slug: URL slug (lowercase, hyphens) derived from the keyword
 - content: pure HTML body using <h2>, <h3>, <p>, <ul>, <li>, <strong>, <a> tags ONLY. NO markdown whatsoever.
 - wordCount: integer word count
 - faqs: array of exactly 4 objects, each with "question" (natural conversational question about this topic) and "answer" (1-3 sentence direct answer, no HTML).
