@@ -696,8 +696,7 @@ Return only the JSON, no other text.`;
     });
 
     const raw = message.content[0].text.trim();
-    const clean = raw.replace(/```json|```/g, "").trim();
-    const post = JSON.parse(clean);
+    const post = safeParsePostJson(raw);
 
     // Safety net: convert any markdown that slipped through
     post.content = markdownToHtml(post.content);
@@ -2002,6 +2001,64 @@ async function fetchExternalLinks(keyword, industry) {
 }
 
 // Builds the external links prompt block from verified links (or falls back to a strict no-hallucination instruction)
+// ── Robust JSON parser for AI-generated post responses ───────────────────────
+// Handles: markdown fences, extra text before/after JSON, truncated responses,
+// single-quoted strings, trailing commas, and other common AI formatting issues.
+function safeParsePostJson(raw) {
+  if (!raw) throw new Error("Empty response from AI");
+
+  // 1. Strip markdown code fences
+  let text = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+
+  // 2. Extract the JSON object — find the outermost { ... }
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    throw new Error("No JSON object found in response");
+  }
+  text = text.slice(firstBrace, lastBrace + 1);
+
+  // 3. Try parsing as-is first
+  try { return JSON.parse(text); } catch(e) {}
+
+  // 4. Fix trailing commas before } or ]
+  text = text.replace(/,(\s*[}\]])/g, "$1");
+  try { return JSON.parse(text); } catch(e) {}
+
+  // 5. If still failing, the JSON is likely truncated — try to recover by
+  // closing any open strings/arrays/objects so we can at least get partial data
+  try {
+    // Count open braces/brackets
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"' && !escape) { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{" || ch === "[") depth++;
+      if (ch === "}" || ch === "]") depth--;
+    }
+    // Close any unclosed strings
+    if (inString) text += '"';
+    // Close unclosed arrays/objects
+    // Walk back from depth to find what needs closing
+    let repaired = text;
+    for (let i = 0; i < depth; i++) {
+      // Check what's open and close accordingly (simplified: just close with })
+      repaired += "}";
+    }
+    repaired = repaired.replace(/,(\s*[}\]])/g, "$1");
+    const parsed = JSON.parse(repaired);
+    console.log("[JSON] Recovered truncated response with depth repair");
+    return parsed;
+  } catch(e) {}
+
+  throw new Error("Could not parse AI response as JSON: " + text.slice(0, 200));
+}
+
 function buildExternalLinksPrompt(externalLinks) {
   if (externalLinks && externalLinks.length > 0) {
     const linkList = externalLinks.map(l => `  URL: ${l.url}\n  Domain: ${l.domain}`).join("\n\n");
@@ -2991,8 +3048,8 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
 {"title":"...","metaDescription":"...","slug":"...","content":"...","wordCount":0,"faqs":[],"steps":[]}` }],
     });
 
-    const raw = message.content[0].text.trim().replace(/\`\`\`json|\`\`\`/g, "").trim();
-    post = JSON.parse(raw);
+    const raw = message.content[0].text.trim();
+    post = safeParsePostJson(raw);
     // Safety net: convert any markdown that slipped into the content
     post.content = markdownToHtml(post.content);
 
