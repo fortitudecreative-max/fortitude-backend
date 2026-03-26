@@ -2992,7 +2992,7 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
     });
 
     const raw = message.content[0].text.trim().replace(/\`\`\`json|\`\`\`/g, "").trim();
-    const post = JSON.parse(raw);
+    post = JSON.parse(raw);
     // Safety net: convert any markdown that slipped into the content
     post.content = markdownToHtml(post.content);
 
