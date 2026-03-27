@@ -1109,6 +1109,12 @@ app.post("/api/publish/wordpress", async (req, res) => {
     // ── Background work — runs after response is sent ─────────────────────
     setImmediate(async () => {
       try {
+        // Link audit — fix broken links, bad anchor text, missing external links
+        try {
+          const { data: clientData } = await supabase.from("clients").select("industry").eq("id", clientId).single();
+          await auditAndFixLinks(wpPost.id, keyword, wordpressUrl, authHeaders, clientData?.industry || "");
+        } catch(e) { console.error("[LinkAudit/bg] Error:", e.message); }
+
         // Yoast optimization loop (density, title, H2s, meta length)
         if (wpPost.link && seoCaps.canWriteSeoMeta) {
           try {
@@ -2814,6 +2820,154 @@ const runYoastOptimizeLoop = async (wpPostId, { title, keyword, metaDescription 
   return { yoastScore, passes: fixes.length, issues: finalIssues, fixes, finalTitle: currentTitle, finalMeta: currentMeta };
 };
 
+// ── LINK AUDITOR ─────────────────────────────────────────────────────────────
+// Runs after every publish. Checks all links in the post content:
+//   1. Extracts all <a href> tags from the HTML
+//   2. HEAD-checks each URL — flags 4xx, timeouts, and redirects to 404s
+//   3. Broken internal links: finds correct WP URL by slug/title search
+//   4. Missing/broken external links: fetches a verified .gov/.org URL and has
+//      Claude write a natural inline sentence referencing it
+//   5. Rewrites any "learn more / our article / click here" anchor text to
+//      natural inline prose — no meta-references to the blog itself
+// Returns a summary of what was fixed.
+const auditAndFixLinks = async (wpPostId, keyword, wpBaseUrl, authHeaders, industry) => {
+  const fixes = [];
+  const Anthropic = require("@anthropic-ai/sdk");
+  const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+  // ── 1. Fetch current post content from WP ────────────────────────────────
+  let content = "";
+  try {
+    const r = await axios.get(`${wpBaseUrl}/wp-json/wp/v2/posts/${wpPostId}?context=edit&_fields=content`, { headers: authHeaders, httpsAgent, timeout: 10000 });
+    content = r.data?.content?.raw || r.data?.content?.rendered || "";
+  } catch(e) { console.log("[LinkAudit] Could not fetch post content:", e.message); return fixes; }
+  if (!content) return fixes;
+
+  // ── 2. Extract all links ──────────────────────────────────────────────────
+  const linkRegex = /<a\s+[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const links = [];
+  let m;
+  while ((m = linkRegex.exec(content)) !== null) {
+    links.push({ full: m[0], href: m[1], anchorText: m[2].replace(/<[^>]+>/g, "").trim(), index: m.index });
+  }
+  console.log(`[LinkAudit] Found ${links.length} links in post ${wpPostId}`);
+
+  const wpHostname = (() => { try { return new URL(wpBaseUrl).hostname; } catch(e) { return ""; } })();
+  let modified = content;
+
+  // ── 3. Check each link ───────────────────────────────────────────────────
+  const badAnchorPattern = /^(learn more|read more|click here|our (blog|article|post)|see (our|this|the) (blog|article|post)|here|this article|this post|more info|find out more|visit|see more)/i;
+
+  for (const link of links) {
+    const isInternal = link.href.includes(wpHostname) || link.href.startsWith("/");
+    const isExternal = !isInternal && link.href.startsWith("http");
+
+    // ── 3a. Check for bad anchor text (applies to all links) ──────────────
+    if (badAnchorPattern.test(link.anchorText.trim())) {
+      console.log(`[LinkAudit] Bad anchor text: "${link.anchorText}" → rewriting`);
+      try {
+        const rewriteRes = await anthropic.messages.create({
+          model: "claude-sonnet-4-5", max_tokens: 300,
+          messages: [{ role: "user", content: `You are editing a blog post about "${keyword}" for a home service company. The following HTML link has bad anchor text that sounds unnatural or meta (like "learn more", "click here", "our article"):
+
+${link.full}
+
+Rewrite this as a natural inline sentence fragment where the linked text is part of a natural phrase. Rules:
+- The linked text must flow naturally as part of a sentence — not "learn more about X" but something like "which the EPA classifies as a Class B hazard"
+- No phrases like: learn more, read more, click here, our blog, our article, our post, see our, find out more
+- Keep the same href
+- Return ONLY the replacement HTML <a> tag (just the tag itself, no surrounding sentence), nothing else` }]
+        });
+        const newLink = rewriteRes.content[0]?.text?.trim();
+        if (newLink && newLink.includes("<a ") && newLink.includes("</a>")) {
+          modified = modified.replace(link.full, newLink);
+          fixes.push({ type: "anchor_rewrite", href: link.href, old: link.anchorText, new: newLink });
+          console.log(`[LinkAudit] Rewrote anchor: "${link.anchorText}" → "${newLink.replace(/<[^>]+>/g, "").trim()}"`);
+        }
+      } catch(e) { console.log("[LinkAudit] Anchor rewrite failed:", e.message); }
+      continue; // skip HEAD check for this link after rewriting
+    }
+
+    // ── 3b. HEAD check ─────────────────────────────────────────────────────
+    try {
+      const check = await axios.head(link.href, { timeout: 6000, maxRedirects: 5, validateStatus: s => s < 400, httpsAgent });
+      if (check.status < 400) continue; // link is fine
+    } catch(e) {
+      console.log(`[LinkAudit] Dead link (${link.href}): ${e.message}`);
+    }
+
+    // ── 3c. Fix broken internal link ───────────────────────────────────────
+    if (isInternal) {
+      try {
+        // Search WP for a page/post matching the anchor text or slug
+        const searchTerm = encodeURIComponent(link.anchorText.slice(0, 50));
+        const searchRes = await axios.get(`${wpBaseUrl}/wp-json/wp/v2/posts?search=${searchTerm}&per_page=5&status=publish&_fields=title,link,slug`, { headers: authHeaders, httpsAgent, timeout: 6000 });
+        const candidates = searchRes.data || [];
+        if (candidates.length > 0) {
+          const best = candidates[0];
+          const newHref = best.link;
+          const oldFull = link.full;
+          const newFull = link.full.replace(link.href, newHref);
+          modified = modified.replace(oldFull, newFull);
+          fixes.push({ type: "internal_fix", old: link.href, new: newHref });
+          console.log(`[LinkAudit] Fixed internal link: ${link.href} → ${newHref}`);
+        } else {
+          // No match found — remove the link but keep the anchor text
+          modified = modified.replace(link.full, link.anchorText);
+          fixes.push({ type: "internal_removed", href: link.href, reason: "no matching page found" });
+          console.log(`[LinkAudit] Removed dead internal link (no match): ${link.href}`);
+        }
+      } catch(e) { console.log("[LinkAudit] Internal fix failed:", e.message); }
+    }
+  }
+
+  // ── 4. Check if post has any external links — add one if missing ─────────
+  const externalLinks = links.filter(l => !l.href.includes(wpHostname) && l.href.startsWith("http"));
+  if (externalLinks.length === 0) {
+    console.log(`[LinkAudit] No external links found — finding and injecting one`);
+    try {
+      const verifiedLinks = await fetchExternalLinks(keyword, industry);
+      if (verifiedLinks.length > 0) {
+        const extLink = verifiedLinks[0];
+        // Use Claude to write a natural sentence that includes this link inline
+        const injectRes = await anthropic.messages.create({
+          model: "claude-sonnet-4-5", max_tokens: 200,
+          messages: [{ role: "user", content: `Write a single natural sentence (no more than 25 words) that references this source inline as part of a blog post about "${keyword}" for a home service company. The linked text must be a natural phrase from the sentence — not "learn more", "click here", "read more", or any meta-reference.
+
+Source URL: ${extLink.url}
+Source domain: ${extLink.domain}
+
+Return ONLY the sentence with the <a href="${extLink.url}" target="_blank" rel="noopener noreferrer">linked text</a> inline. No preamble, no explanation.` }]
+        });
+        const injectedSentence = injectRes.content[0]?.text?.trim();
+        if (injectedSentence && injectedSentence.includes("<a ")) {
+          // Insert after the first </p> tag
+          const insertAt = modified.indexOf("</p>");
+          if (insertAt !== -1) {
+            modified = modified.slice(0, insertAt + 4) + `\n<p>${injectedSentence}</p>` + modified.slice(insertAt + 4);
+            fixes.push({ type: "external_added", url: extLink.url, sentence: injectedSentence });
+            console.log(`[LinkAudit] Injected external link: ${extLink.url}`);
+          }
+        }
+      } else {
+        console.log("[LinkAudit] No verified external links found to inject");
+      }
+    } catch(e) { console.log("[LinkAudit] External link injection failed:", e.message); }
+  }
+
+  // ── 5. Write updated content back to WP if anything changed ─────────────
+  if (fixes.length > 0 && modified !== content) {
+    try {
+      await axios.post(`${wpBaseUrl}/wp-json/wp/v2/posts/${wpPostId}`, { content: modified }, { headers: { ...authHeaders, "Content-Type": "application/json" }, httpsAgent });
+      console.log(`[LinkAudit] ✓ Updated post ${wpPostId} — ${fixes.length} fix(es) applied`);
+    } catch(e) { console.log("[LinkAudit] Failed to write fixed content:", e.message); }
+  } else {
+    console.log(`[LinkAudit] ✓ No link fixes needed for post ${wpPostId}`);
+  }
+
+  return fixes;
+};
+
 const qaRepairLoop = async (wpPostId, liveUrl, qaContext, wpBaseUrl, authHeaders) => {
   const { title, keyword, metaDescription } = qaContext;
   const history = [];   // [{cycle, qa, rewriteReason}]
@@ -3215,6 +3369,10 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
     // ── Post-publish QA + auto-repair loop ────────────────────────────────
     const liveUrl = wpRes.data.link;
     if (liveUrl) {
+      try {
+        // Link audit first — fix broken links, bad anchors, missing external links
+        await auditAndFixLinks(wpRes.data.id, keyword, client.wordpress_url, { ...authHeaders, "Content-Type": "application/json" }, client.industry || "");
+      } catch(e) { console.error("[LinkAudit/scheduler] Error:", e.message); }
       try {
         const { qa, history: repairHistory } = await qaRepairLoop(
           wpRes.data.id, liveUrl,
