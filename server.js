@@ -5212,6 +5212,9 @@ app.post("/api/gbp/auto-post/:clientId", requireAuth, async (req, res) => {
       .substring(0, 3000);
 
     // 3. Generate GBP-optimized summary via AI
+    const Anthropic = require("@anthropic-ai/sdk");
+    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
     const gbpPrompt = `You are a local SEO expert writing a Google Business Profile post for "${clientName}", a ${industry} company${serviceArea ? " serving " + serviceArea : ""}.
 
 Based on this blog post, write a compelling GBP update post that:
@@ -5229,7 +5232,7 @@ Blog Content Summary: ${plainContent}
 
 Return ONLY the GBP post text, nothing else.`;
 
-    const aiResponse = await client.messages.create({
+    const aiResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
       max_tokens: 500,
       messages: [{ role: "user", content: gbpPrompt }],
@@ -5258,6 +5261,201 @@ Return ONLY the GBP post text, nothing else.`;
 
   } catch (e) {
     console.error("[gbp-auto] Error:", e.response?.data || e.message);
+    res.status(500).json({ success: false, error: e.response?.data?.error?.message || e.message });
+  }
+});
+
+
+// ── GBP Generate Update (standalone or blog-based, with auto image) ──────────
+app.post("/api/gbp/generate-update/:clientId", requireAuth, async (req, res) => {
+  const { clientId } = req.params;
+  const { mode, topic, keyword, blogTitle, blogContent, blogUrl, metaDescription } = req.body;
+  // mode: "standalone" or "blog"
+
+  try {
+    // 1. Get client info
+    const { data: clientData } = await supabase
+      .from("clients")
+      .select("gbp_location_name, name, industry, service_area, website_url")
+      .eq("id", clientId)
+      .single();
+    if (!clientData || !clientData.gbp_location_name) {
+      return res.status(400).json({ success: false, error: "No GBP location assigned to this client" });
+    }
+
+    // 2. Auto-select best image from client's image library
+    const { data: clientImages } = await supabase
+      .from("image_library")
+      .select("*")
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false });
+
+    const keywordText = keyword || topic || blogTitle || "";
+    const keywordWords = keywordText.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    const selectedImage = selectFeaturedImage(clientImages || [], keywordWords);
+    const imageUrl = selectedImage ? selectedImage.storage_path : null;
+
+    // 3. Generate the GBP post via AI
+    const Anthropic = require("@anthropic-ai/sdk");
+    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+    let gbpPrompt;
+    if (mode === "blog" && blogContent) {
+      const plainContent = blogContent.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().substring(0, 3000);
+      gbpPrompt = `You are a local SEO expert writing a Google Business Profile post for "${clientData.name}", a ${clientData.industry || "local"} company${clientData.service_area ? " serving " + clientData.service_area : ""}.
+
+Based on this blog post, write a compelling GBP update post that:
+- Is between 100-300 words (max 1500 characters)
+- Summarizes the key value/insight from the blog in a way that appeals to LOCAL customers
+- Uses a friendly, professional tone
+- Includes a clear call-to-action to read the full blog
+- Naturally incorporates the keyword "${keyword || ""}" once or twice
+- Does NOT use hashtags, emojis, or markdown formatting
+- Writes in plain text paragraphs only
+
+Blog Title: ${blogTitle}
+Meta Description: ${metaDescription || "N/A"}
+Blog Content Summary: ${plainContent}
+
+Return ONLY the GBP post text, nothing else.`;
+    } else {
+      // Standalone mode
+      gbpPrompt = `You are a local SEO expert writing a Google Business Profile post for "${clientData.name}", a ${clientData.industry || "local"} company${clientData.service_area ? " serving " + clientData.service_area : ""}.
+
+Write a compelling GBP update post about the topic: "${topic || keyword || "general business update"}"
+
+The post should:
+- Be between 100-300 words (max 1500 characters)
+- Appeal to LOCAL customers and highlight the business's expertise
+- Use a friendly, professional tone
+- Include a clear call-to-action (visit website, call, book, etc.)
+- Naturally incorporate "${keyword || topic || ""}" once or twice if relevant
+- Does NOT use hashtags, emojis, or markdown formatting
+- Writes in plain text paragraphs only
+- Feel like a genuine business update, not an ad
+
+Return ONLY the GBP post text, nothing else.`;
+    }
+
+    const aiResponse = await anthropic.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 500,
+      messages: [{ role: "user", content: gbpPrompt }],
+    });
+
+    const summary = aiResponse.content[0].text.trim().substring(0, 1500);
+
+    // 4. Mark image as used
+    if (selectedImage) await markImageUsed(selectedImage.id);
+
+    // 5. Post to GBP
+    const access_token = await getAgencyAccessToken();
+    const ctaUrl = mode === "blog" && blogUrl ? blogUrl : (clientData.website_url || "");
+    const postBody = {
+      languageCode: "en",
+      summary,
+      topicType: "STANDARD",
+      ...(ctaUrl ? { callToAction: { actionType: "LEARN_MORE", url: ctaUrl } } : {}),
+      ...(imageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: imageUrl }] } : {}),
+    };
+
+    await axios.post(
+      `https://mybusiness.googleapis.com/v4/${clientData.gbp_location_name}/localPosts`,
+      postBody,
+      { headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" } }
+    );
+
+    console.log(`[gbp-generate] ✓ ${mode} GBP post published for client`, clientId);
+    res.json({ success: true, summary, imageUrl, imageName: selectedImage?.filename || null });
+
+  } catch (e) {
+    console.error("[gbp-generate] Error:", e.response?.data || e.message);
+    res.status(500).json({ success: false, error: e.response?.data?.error?.message || e.message });
+  }
+});
+
+// ── GBP Generate Preview (returns AI text + image without posting) ────────────
+app.post("/api/gbp/generate-preview/:clientId", requireAuth, async (req, res) => {
+  const { clientId } = req.params;
+  const { mode, topic, keyword, blogTitle, blogContent, metaDescription } = req.body;
+
+  try {
+    const { data: clientData } = await supabase
+      .from("clients")
+      .select("gbp_location_name, name, industry, service_area, website_url")
+      .eq("id", clientId)
+      .single();
+    if (!clientData) return res.status(400).json({ success: false, error: "Client not found" });
+
+    // Auto-select image
+    const { data: clientImages } = await supabase
+      .from("image_library")
+      .select("*")
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false });
+
+    const keywordText = keyword || topic || blogTitle || "";
+    const keywordWords = keywordText.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    const selectedImage = selectFeaturedImage(clientImages || [], keywordWords);
+
+    // Generate AI text
+    const Anthropic = require("@anthropic-ai/sdk");
+    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+    let gbpPrompt;
+    if (mode === "blog" && blogContent) {
+      const plainContent = blogContent.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().substring(0, 3000);
+      gbpPrompt = `You are a local SEO expert writing a Google Business Profile post for "${clientData.name}", a ${clientData.industry || "local"} company${clientData.service_area ? " serving " + clientData.service_area : ""}.
+
+Based on this blog post, write a compelling GBP update post that:
+- Is between 100-300 words (max 1500 characters)
+- Summarizes the key value/insight from the blog in a way that appeals to LOCAL customers
+- Uses a friendly, professional tone
+- Includes a clear call-to-action to read the full blog
+- Naturally incorporates the keyword "${keyword || ""}" once or twice
+- Does NOT use hashtags, emojis, or markdown formatting
+- Writes in plain text paragraphs only
+
+Blog Title: ${blogTitle}
+Meta Description: ${metaDescription || "N/A"}
+Blog Content Summary: ${plainContent}
+
+Return ONLY the GBP post text, nothing else.`;
+    } else {
+      gbpPrompt = `You are a local SEO expert writing a Google Business Profile post for "${clientData.name}", a ${clientData.industry || "local"} company${clientData.service_area ? " serving " + clientData.service_area : ""}.
+
+Write a compelling GBP update post about the topic: "${topic || keyword || "general business update"}"
+
+The post should:
+- Be between 100-300 words (max 1500 characters)
+- Appeal to LOCAL customers and highlight the business's expertise
+- Use a friendly, professional tone
+- Include a clear call-to-action (visit website, call, book, etc.)
+- Naturally incorporate "${keyword || topic || ""}" once or twice if relevant
+- Does NOT use hashtags, emojis, or markdown formatting
+- Writes in plain text paragraphs only
+- Feel like a genuine business update, not an ad
+
+Return ONLY the GBP post text, nothing else.`;
+    }
+
+    const aiResponse = await anthropic.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 500,
+      messages: [{ role: "user", content: gbpPrompt }],
+    });
+
+    const summary = aiResponse.content[0].text.trim().substring(0, 1500);
+
+    res.json({
+      success: true,
+      summary,
+      imageUrl: selectedImage?.storage_path || null,
+      imageName: selectedImage?.filename || null,
+      imageId: selectedImage?.id || null,
+    });
+
+  } catch (e) {
+    console.error("[gbp-preview] Error:", e.response?.data || e.message);
     res.status(500).json({ success: false, error: e.response?.data?.error?.message || e.message });
   }
 });
