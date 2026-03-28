@@ -1142,28 +1142,8 @@ app.post("/api/publish/wordpress", async (req, res) => {
           } catch(e) { console.error("[bg] Used keyword hook error:", e.message); }
         }
 
-        // GBP auto-post
-        if (clientId && wpPost.link && agencyGbpToken.refresh_token) {
-          try {
-            const { data: clientData } = await supabase.from("clients").select("gbp_location_name").eq("id", clientId).single();
-            if (clientData?.gbp_location_name) {
-              const access_token = await getAgencyAccessToken();
-              const gbpBody = {
-                languageCode: "en",
-                summary: metaDescription || `${title} — read our latest post for expert tips and advice.`,
-                topicType: "STANDARD",
-                callToAction: { actionType: "LEARN_MORE", url: wpPost.link },
-                ...(featuredImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: featuredImageUrl }] } : {}),
-              };
-              await axios.post(
-                `https://mybusiness.googleapis.com/v4/${clientData.gbp_location_name}/localPosts`,
-                gbpBody,
-                { headers: { Authorization: `Bearer ${await getAgencyAccessToken()}`, "Content-Type": "application/json" } }
-              );
-              console.log("[bg] ✓ GBP post auto-published for client", clientId);
-            }
-          } catch(gbpErr) { console.error("[bg] GBP auto-post error:", gbpErr.response?.data || gbpErr.message); }
-        }
+        // GBP auto-post — DISABLED: now handled by frontend calling /api/gbp/auto-post/:clientId (AI-generated)
+        // if (clientId && wpPost.link && agencyGbpToken.refresh_token) { ... }
       } catch(e) { console.error("[bg] Post-publish background error:", e.message); }
     });
   } catch (error) {
@@ -5209,6 +5189,76 @@ app.get("/api/gbp/posts/:clientId", async (req, res) => {
     res.json({ posts: postsRes.data.localPosts || [] });
   } catch (e) {
     res.json({ posts: [], error: e.message });
+  }
+});
+
+// ── GBP Auto-Post (AI-generated summary) ──────────────────────────────────────────
+app.post("/api/gbp/auto-post/:clientId", requireAuth, async (req, res) => {
+  const { clientId } = req.params;
+  const { blogTitle, blogContent, blogUrl, keyword, metaDescription, featuredImageUrl, clientName, industry, serviceArea } = req.body;
+
+  try {
+    // 1. Check GBP connection
+    const { data: clientData } = await supabase.from("clients").select("gbp_location_name").eq("id", clientId).single();
+    if (!clientData || !clientData.gbp_location_name) {
+      return res.status(400).json({ success: false, error: "No GBP location assigned to this client" });
+    }
+
+    // 2. Strip HTML from blog content for the AI prompt
+    const plainContent = blogContent
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\\s+/g, " ")
+      .trim()
+      .substring(0, 3000);
+
+    // 3. Generate GBP-optimized summary via AI
+    const gbpPrompt = `You are a local SEO expert writing a Google Business Profile post for "${clientName}", a ${industry} company${serviceArea ? " serving " + serviceArea : ""}.
+
+Based on this blog post, write a compelling GBP update post that:
+- Is between 100-300 words (max 1500 characters)
+- Summarizes the key value/insight from the blog in a way that appeals to LOCAL customers
+- Uses a friendly, professional tone
+- Includes a clear call-to-action to read the full blog
+- Naturally incorporates the keyword "${keyword}" once or twice
+- Does NOT use hashtags, emojis, or markdown formatting
+- Writes in plain text paragraphs only
+
+Blog Title: ${blogTitle}
+Meta Description: ${metaDescription || "N/A"}
+Blog Content Summary: ${plainContent}
+
+Return ONLY the GBP post text, nothing else.`;
+
+    const aiResponse = await client.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 500,
+      messages: [{ role: "user", content: gbpPrompt }],
+    });
+
+    const summary = aiResponse.content[0].text.trim().substring(0, 1500);
+
+    // 4. Post to GBP
+    const access_token = await getAgencyAccessToken();
+    const postBody = {
+      languageCode: "en",
+      summary,
+      topicType: "STANDARD",
+      callToAction: { actionType: "LEARN_MORE", url: blogUrl },
+      ...(featuredImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: featuredImageUrl }] } : {}),
+    };
+
+    await axios.post(
+      `https://mybusiness.googleapis.com/v4/${clientData.gbp_location_name}/localPosts`,
+      postBody,
+      { headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" } }
+    );
+
+    console.log("[gbp-auto] \u2713 AI-generated GBP post published for client", clientId);
+    res.json({ success: true, summary });
+
+  } catch (e) {
+    console.error("[gbp-auto] Error:", e.response?.data || e.message);
+    res.status(500).json({ success: false, error: e.response?.data?.error?.message || e.message });
   }
 });
 
