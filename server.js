@@ -2168,10 +2168,10 @@ async function markImageUsed(imageId) {
   }
 }
 
-// ── WebP → JPG conversion (zero extra deps — uses Supabase image transform + re-upload) ──
+// ── WebP → JPG conversion (zero extra deps — uses wsrv.nl image proxy + Supabase re-upload) ──
 // Google My Business API does NOT accept WebP images. This function:
-// 1. Builds a Supabase render URL that converts WebP→JPEG on the fly
-// 2. Downloads the JPEG bytes server-side via axios (already installed)
+// 1. Uses wsrv.nl (free open-source image proxy) to convert WebP→JPEG
+// 2. Downloads the converted JPEG bytes server-side via axios
 // 3. Uploads the JPEG to Supabase storage under converted/ folder
 // 4. Returns the permanent public URL of the new JPEG (which Google CAN fetch)
 async function convertWebpToJpg(imageUrl, keyword) {
@@ -2179,14 +2179,12 @@ async function convertWebpToJpg(imageUrl, keyword) {
   if (!imageUrl.toLowerCase().endsWith(".webp")) return imageUrl;
 
   try {
-    // Step 1: Build Supabase render URL that converts to JPEG
-    const renderUrl = imageUrl
-      .replace("/storage/v1/object/public/", "/storage/v1/render/image/public/")
-      + "?format=jpeg&quality=85";
-    console.log("[Image] Fetching JPEG from Supabase render URL (server-side)...");
+    // Step 1: Use wsrv.nl to convert WebP→JPEG on the fly
+    const proxyUrl = `https://wsrv.nl/?url=${encodeURIComponent(imageUrl)}&output=jpg&q=85`;
+    console.log("[Image] Converting WebP→JPG via wsrv.nl proxy...");
 
-    // Step 2: Download the converted JPEG bytes (server-to-server, this works fine)
-    const response = await axios.get(renderUrl, { responseType: "arraybuffer", timeout: 15000 });
+    // Step 2: Download the converted JPEG bytes (server-to-server)
+    const response = await axios.get(proxyUrl, { responseType: "arraybuffer", timeout: 20000 });
     const jpegBuffer = Buffer.from(response.data);
     console.log("[Image] Downloaded JPEG bytes:", jpegBuffer.length, "bytes");
 
