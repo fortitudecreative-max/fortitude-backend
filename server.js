@@ -587,7 +587,10 @@ app.post("/api/content/generate", async (req, res) => {
         const pages = wpPagesRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "page" }));
         // Also fetch published blog posts for topic cluster internal linking
         const wpPostsRes = await axios.get(`${wordpressUrl}/wp-json/wp/v2/posts?per_page=30&status=publish&_fields=title,link,slug`, { httpsAgent });
-        const posts = wpPostsRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "post" }));
+        const currentSlug = keyword.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        const posts = wpPostsRes.data
+          .filter(p => p.slug !== currentSlug) // exclude the post being generated
+          .map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "post" }));
         internalPages = [...pages, ...posts];
       } catch (e) {
         console.log("Could not fetch WordPress pages/posts:", e.message);
@@ -1960,68 +1963,54 @@ app.put("/api/schedule/:clientId", async (req, res) => {
 // Fetches all existing page/post titles and slugs from WP + Supabase so
 // the generator can avoid duplicating them.
 // ── External link fetcher ─────────────────────────────────────────────────────
-// Searches DuckDuckGo for real, verifiable URLs relevant to the keyword+industry,
-// HEAD-checks each one, and returns up to 2 working links with titles.
+// Uses Claude to suggest real, specific authoritative URLs it knows exist,
+// then HEAD-checks each one to verify before using it.
 async function fetchExternalLinks(keyword, industry) {
   const results = [];
-  // Authoritative domains to prefer by industry
-  const domainHints = {
-    hvac: ["energy.gov", "energystar.gov", "acca.org", "ashrae.org"],
-    plumbing: ["epa.gov", "awwa.org", "phccweb.org"],
-    electrical: ["nfpa.org", "epa.gov", "energy.gov"],
-    roofing: ["nrca.net", "ibhs.org", "fema.gov"],
-    default: ["energy.gov", "epa.gov", "fema.gov", "thisoldhouse.com", "familyhandyman.com"],
-  };
-  const industryKey = Object.keys(domainHints).find(k => (industry || "").toLowerCase().includes(k)) || "default";
-  const preferred = domainHints[industryKey];
+  try {
+    const Anthropic = require("@anthropic-ai/sdk");
+    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-  // Build search queries — one targeted, one broader
-  const queries = [
-    `${keyword} ${industry} site:${preferred[0]} OR site:${preferred[1]}`,
-    `${keyword} home service tips`,
-  ];
+    const res = await anthropic.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 300,
+      messages: [{ role: "user", content: `Suggest 3 real, specific URLs from authoritative sources (.gov, .org, or major industry bodies) that are directly relevant to this home service blog topic: "${keyword}" in the ${industry} industry.
 
-  for (const q of queries) {
-    if (results.length >= 2) break;
-    try {
-      // DuckDuckGo HTML search — no API key required
-      const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
-      const res = await axios.get(searchUrl, {
-        timeout: 6000,
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; FortitudeBot/1.0)" },
-      });
-      const html = res.data;
-      // Extract result URLs from DuckDuckGo HTML
-      const urlMatches = [...html.matchAll(/href="(https?:\/\/[^"&]+)"/g)]
-        .map(m => m[1])
-        .filter(u => {
-          try { const h = new URL(u).hostname.replace("www.", ""); return preferred.some(d => h.includes(d)) || h.includes(".gov") || h.includes(".org"); }
-          catch { return false; }
-        })
-        .filter(u => !u.includes("duckduckgo") && !u.includes("google") && u.length < 200);
+Rules:
+- Must be a SPECIFIC PAGE (article, guide, resource) — not a homepage or root domain
+- Must be a URL you are genuinely confident exists from your training data
+- Prefer .gov and .org sources (EPA, DOE, ENERGY STAR, NFPA, etc.)
+- The page must be directly relevant to "${keyword}"
+- If you are not confident a URL exists, do not include it
 
-      for (const url of urlMatches) {
-        if (results.length >= 2) break;
-        if (results.some(r => r.url === url)) continue;
-        try {
-          // HEAD check to verify URL actually resolves
-          const check = await axios.head(url, { timeout: 4000, maxRedirects: 3, validateStatus: s => s < 400 });
-          if (check.status < 400) {
-            // Extract a readable title from the URL path
-            const path = new URL(url).pathname.replace(/\//g, " ").replace(/-/g, " ").replace(/\.[^.]+$/, "").trim();
-            const title = path.length > 5 ? path : new URL(url).hostname.replace("www.", "");
-            results.push({ url, title, domain: new URL(url).hostname.replace("www.", "") });
-            console.log(`[ExternalLinks] Verified: ${url}`);
-          }
-        } catch (e) {
-          console.log(`[ExternalLinks] Dead link skipped: ${url}`);
+Return ONLY a JSON array of objects, no other text:
+[{"url": "https://...", "domain": "epa.gov", "description": "brief description"}]
+If you cannot find any confident URLs, return an empty array: []` }]
+    });
+
+    const raw = res.content[0]?.text?.trim().replace(/```json|```/g, "").trim();
+    const suggested = JSON.parse(raw);
+    if (!Array.isArray(suggested)) return results;
+
+    // HEAD-check each suggested URL
+    for (const item of suggested) {
+      if (results.length >= 2) break;
+      if (!item.url || !item.url.startsWith("http")) continue;
+      try {
+        const check = await axios.head(item.url, { timeout: 5000, maxRedirects: 3, validateStatus: s => s < 400, httpsAgent });
+        if (check.status < 400) {
+          results.push({ url: item.url, domain: item.domain || new URL(item.url).hostname.replace("www.", ""), description: item.description || "" });
+          console.log(`[ExternalLinks] Verified: ${item.url}`);
+        } else {
+          console.log(`[ExternalLinks] Failed check (${check.status}): ${item.url}`);
         }
+      } catch(e) {
+        console.log(`[ExternalLinks] Dead link skipped: ${item.url} — ${e.message}`);
       }
-    } catch (e) {
-      console.log(`[ExternalLinks] Search failed for "${q}":`, e.message);
     }
+  } catch(e) {
+    console.log("[ExternalLinks] fetch error:", e.message);
   }
-
   return results;
 }
 
@@ -2985,25 +2974,44 @@ Rewrite this as a natural inline sentence fragment where the linked text is part
       const verifiedLinks = await fetchExternalLinks(keyword, industry);
       if (verifiedLinks.length > 0) {
         const extLink = verifiedLinks[0];
-        // Use Claude to write a natural sentence that includes this link inline
+        // Read the first 1500 chars of content for context
+        const contentSnippet = content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 1500);
+        // Use Claude to write a natural sentence + identify where to inject it
         const injectRes = await anthropic.messages.create({
-          model: "claude-sonnet-4-5", max_tokens: 200,
-          messages: [{ role: "user", content: `Write a single natural sentence (no more than 25 words) that references this source inline as part of a blog post about "${keyword}" for a home service company. The linked text must be a natural phrase from the sentence — not "learn more", "click here", "read more", or any meta-reference.
+          model: "claude-sonnet-4-5", max_tokens: 300,
+          messages: [{ role: "user", content: `You are editing a published blog post about "${keyword}". Add a single natural sentence that references this authoritative source inline.
 
 Source URL: ${extLink.url}
 Source domain: ${extLink.domain}
+${extLink.description ? `Source description: ${extLink.description}` : ""}
 
-Return ONLY the sentence with the <a href="${extLink.url}" target="_blank" rel="noopener noreferrer">linked text</a> inline. No preamble, no explanation.` }]
+Blog content excerpt:
+${contentSnippet}
+
+Rules:
+- Write ONE sentence that flows naturally in this blog's context
+- The linked text must be a natural phrase within the sentence (e.g. "which the EPA notes is..." or "according to the Department of Energy,...")
+- NO "learn more", "click here", "read more", "our article", or any meta-reference language
+- Include the link as: <a href="${extLink.url}" target="_blank" rel="noopener noreferrer">natural phrase</a>
+- Return ONLY the sentence HTML, nothing else` }]
         });
         const injectedSentence = injectRes.content[0]?.text?.trim();
         if (injectedSentence && injectedSentence.includes("<a ")) {
-          // Insert after the first </p> tag
-          const insertAt = modified.indexOf("</p>");
-          if (insertAt !== -1) {
-            modified = modified.slice(0, insertAt + 4) + `\n<p>${injectedSentence}</p>` + modified.slice(insertAt + 4);
-            fixes.push({ type: "external_added", url: extLink.url, sentence: injectedSentence });
-            console.log(`[LinkAudit] Injected external link: ${extLink.url}`);
+          // Insert after the second </p> tag so it's not right at the top
+          let insertCount = 0;
+          const insertAt = modified.replace(/<\/p>/gi, (match, offset) => {
+            insertCount++;
+            if (insertCount === 2) return `</p>\n<p>${injectedSentence}</p>`;
+            return match;
+          });
+          if (insertCount >= 2) {
+            modified = insertAt;
+          } else {
+            // Fallback: after first </p>
+            modified = modified.replace("</p>", `</p>\n<p>${injectedSentence}</p>`);
           }
+          fixes.push({ type: "external_added", url: extLink.url, sentence: injectedSentence });
+          console.log(`[LinkAudit] Injected external link: ${extLink.url}`);
         }
       } else {
         console.log("[LinkAudit] No verified external links found to inject");
@@ -3180,7 +3188,10 @@ const publishPostForClient = async (client, keyword, draftPost = null) => {
         const wpPagesRes = await axios.get(`${client.wordpress_url}/wp-json/wp/v2/pages?per_page=20&_fields=title,link,slug`, { httpsAgent });
         const pages = wpPagesRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "page" }));
         const wpPostsRes = await axios.get(`${client.wordpress_url}/wp-json/wp/v2/posts?per_page=30&status=publish&_fields=title,link,slug`, { httpsAgent });
-        const posts = wpPostsRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "post" }));
+        const currentSlug = keyword.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        const posts = wpPostsRes.data
+          .filter(p => p.slug !== currentSlug)
+          .map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "post" }));
         internalPages = [...pages, ...posts];
       } catch (e) {}
     }
