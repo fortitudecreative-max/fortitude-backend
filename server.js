@@ -3382,6 +3382,7 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
     if (agencyGbpToken.refresh_token && client.gbp_location_name) {
       try {
         const access_token = await getAgencyAccessToken();
+        const gbpPath = client.gbp_account_name ? client.gbp_account_name + "/" + client.gbp_location_name : client.gbp_location_name;
         const gbpSummary = post.metaDescription || `${post.title} — read our latest post for expert tips and advice.`;
         const gbpBody = {
           languageCode: "en",
@@ -3391,7 +3392,7 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
           ...(featuredImage?.storage_path ? { media: [{ mediaFormat: "PHOTO", sourceUrl: featuredImage.storage_path }] } : {}),
         };
         await axios.post(
-          `https://mybusiness.googleapis.com/v4/${client.gbp_location_name}/localPosts`,
+          `https://mybusiness.googleapis.com/v4/${gbpPath}/localPosts`,
           gbpBody,
           { headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" } }
         );
@@ -5153,8 +5154,9 @@ app.post("/api/gbp/post/:clientId", async (req, res) => {
   if (!summary) return res.status(400).json({ error: "summary is required" });
   try {
     const access_token = await getAgencyAccessToken();
-    const { data: client } = await supabase.from("clients").select("gbp_location_name").eq("id", clientId).single();
+    const { data: client } = await supabase.from("clients").select("gbp_location_name, gbp_account_name").eq("id", clientId).single();
     if (!client?.gbp_location_name) return res.status(400).json({ error: "No GBP location assigned to this client" });
+    const gbpPath = client.gbp_account_name ? client.gbp_account_name + "/" + client.gbp_location_name : client.gbp_location_name;
 
     const postBody = {
       languageCode: "en",
@@ -5165,7 +5167,7 @@ app.post("/api/gbp/post/:clientId", async (req, res) => {
     };
 
     const postRes = await axios.post(
-      `https://mybusiness.googleapis.com/v4/${client.gbp_location_name}/localPosts`,
+      `https://mybusiness.googleapis.com/v4/${gbpPath}/localPosts`,
       postBody,
       { headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" } }
     );
@@ -5180,10 +5182,11 @@ app.get("/api/gbp/posts/:clientId", async (req, res) => {
   const { clientId } = req.params;
   try {
     const access_token = await getAgencyAccessToken();
-    const { data: client } = await supabase.from("clients").select("gbp_location_name").eq("id", clientId).single();
+    const { data: client } = await supabase.from("clients").select("gbp_location_name, gbp_account_name").eq("id", clientId).single();
     if (!client?.gbp_location_name) return res.json({ posts: [] });
+    const gbpPath = client.gbp_account_name ? client.gbp_account_name + "/" + client.gbp_location_name : client.gbp_location_name;
     const postsRes = await axios.get(
-      `https://mybusiness.googleapis.com/v4/${client.gbp_location_name}/localPosts`,
+      `https://mybusiness.googleapis.com/v4/${gbpPath}/localPosts`,
       { headers: { Authorization: `Bearer ${access_token}` } }
     );
     res.json({ posts: postsRes.data.localPosts || [] });
@@ -5199,7 +5202,7 @@ app.post("/api/gbp/auto-post/:clientId", requireAuth, async (req, res) => {
 
   try {
     // 1. Check GBP connection
-    const { data: clientData } = await supabase.from("clients").select("gbp_location_name").eq("id", clientId).single();
+    const { data: clientData } = await supabase.from("clients").select("gbp_location_name, gbp_account_name").eq("id", clientId).single();
     if (!clientData || !clientData.gbp_location_name) {
       return res.status(400).json({ success: false, error: "No GBP location assigned to this client" });
     }
@@ -5242,6 +5245,7 @@ Return ONLY the GBP post text, nothing else.`;
 
     // 4. Post to GBP
     const access_token = await getAgencyAccessToken();
+    const gbpPath = clientData.gbp_account_name ? clientData.gbp_account_name + "/" + clientData.gbp_location_name : clientData.gbp_location_name;
     const postBody = {
       languageCode: "en",
       summary,
@@ -5251,7 +5255,7 @@ Return ONLY the GBP post text, nothing else.`;
     };
 
     await axios.post(
-      `https://mybusiness.googleapis.com/v4/${clientData.gbp_location_name}/localPosts`,
+      `https://mybusiness.googleapis.com/v4/${gbpPath}/localPosts`,
       postBody,
       { headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" } }
     );
@@ -5276,7 +5280,7 @@ app.post("/api/gbp/generate-update/:clientId", requireAuth, async (req, res) => 
     // 1. Get client info
     const { data: clientData, error: clientError } = await supabase
       .from("clients")
-      .select("gbp_location_name, name, industry, service_area, domain")
+      .select("gbp_location_name, gbp_account_name, name, industry, service_area, domain")
       .eq("id", clientId)
       .single();
     if (clientError) {
@@ -5353,6 +5357,7 @@ Return ONLY the GBP post text, nothing else.`;
 
     // 5. Post to GBP
     const access_token = await getAgencyAccessToken();
+    const gbpPath = clientData.gbp_account_name ? clientData.gbp_account_name + "/" + clientData.gbp_location_name : clientData.gbp_location_name;
     const ctaUrl = mode === "blog" && blogUrl ? blogUrl : (clientData.domain || "");
     const postBody = {
       languageCode: "en",
@@ -5363,7 +5368,7 @@ Return ONLY the GBP post text, nothing else.`;
     };
 
     await axios.post(
-      `https://mybusiness.googleapis.com/v4/${clientData.gbp_location_name}/localPosts`,
+      `https://mybusiness.googleapis.com/v4/${gbpPath}/localPosts`,
       postBody,
       { headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" } }
     );
@@ -5385,7 +5390,7 @@ app.post("/api/gbp/generate-preview/:clientId", requireAuth, async (req, res) =>
   try {
     const { data: clientData, error: clientError } = await supabase
       .from("clients")
-      .select("gbp_location_name, name, industry, service_area, domain")
+      .select("gbp_location_name, gbp_account_name, name, industry, service_area, domain")
       .eq("id", clientId)
       .single();
     if (clientError) {
