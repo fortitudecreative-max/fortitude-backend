@@ -5097,13 +5097,15 @@ app.get("/api/gbp/locations", async (req, res) => {
     const allLocations = [];
     for (const account of accounts) {
       try {
-        const locRes = await axios.get(
-          `https://mybusinessbusinessinformation.googleapis.com/v1/${account.name}/locations?readMask=name,title,storefrontAddress`,
-          { headers: { Authorization: `Bearer ${access_token}` } }
-        );
-        (locRes.data.locations || []).forEach(loc => {
-          allLocations.push({ name: loc.name, title: loc.title, accountName: account.name, address: loc.storefrontAddress?.addressLines?.[0] || "" });
-        });
+        let nextPageToken = null;
+        do {
+          const url = `https://mybusinessbusinessinformation.googleapis.com/v1/${account.name}/locations?readMask=name,title,storefrontAddress&pageSize=100${nextPageToken ? "&pageToken=" + nextPageToken : ""}`;
+          const locRes = await axios.get(url, { headers: { Authorization: `Bearer ${access_token}` } });
+          (locRes.data.locations || []).forEach(loc => {
+            allLocations.push({ name: loc.name, title: loc.title, accountName: account.name, address: loc.storefrontAddress?.addressLines?.[0] || "" });
+          });
+          nextPageToken = locRes.data.nextPageToken || null;
+        } while (nextPageToken);
       } catch (e) {
         const status = e.response?.status;
         const msg = e.response?.data?.error?.message || e.message;
