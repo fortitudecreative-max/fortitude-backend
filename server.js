@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
+const sharp = require("sharp");
 const multer = require("multer");
 const https = require("https");
 require("dotenv").config();
@@ -2112,14 +2113,29 @@ function buildExistingContentPrompt(existingContent) {
 // have been published after it. We enforce this by:
 //   1. Filtering out any image whose last_used_at is among the COOLDOWN most recent usages
 //   2. If all images are on cooldown (small library), use the least-recently-used one
+// Convert WebP image to JPG via Sharp, re-upload to Supabase, return new URL
+async function convertWebpToJpg(imageUrl, keyword) {
+  try {
+    if (!imageUrl || !imageUrl.toLowerCase().endsWith(".webp")) return imageUrl;
+    console.log("[Image] Converting WebP to JPG:", imageUrl);
+    const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
+    const jpgBuffer = await sharp(Buffer.from(response.data)).jpeg({ quality: 85 }).toBuffer();
+    const slug = (keyword || "image").toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 50);
+    const newPath = "staging/" + Date.now() + "_" + slug + ".jpg";
+    const { error } = await supabase.storage.from("image-library").upload(newPath, jpgBuffer, { contentType: "image/jpeg", upsert: true });
+    if (error) { console.error("[Image] JPG upload failed:", error); return imageUrl; }
+    const { data: urlData } = supabase.storage.from("image-library").getPublicUrl(newPath);
+    console.log("[Image] Converted to JPG:", urlData.publicUrl);
+    return urlData.publicUrl;
+  } catch (e) {
+    console.error("[Image] WebP conversion failed:", e.message);
+    return imageUrl;
+  }
+}
+
 function selectFeaturedImage(images, keywordWords = []) {
   if (!images || images.length === 0) return null;
-  // Filter out WebP images - Google My Business API only supports JPEG, PNG, GIF
-  images = images.filter(img => {
-    const path = (img.storage_path || "").toLowerCase();
-    return !path.endsWith(".webp");
-  });
-  if (images.length === 0) return null;
+
   const COOLDOWN = 10;
 
   // Build a meaningful word list from the keyword - skip stop words and short words
@@ -5166,12 +5182,15 @@ app.post("/api/gbp/post/:clientId", async (req, res) => {
     if (!client?.gbp_location_name) return res.status(400).json({ error: "No GBP location assigned to this client" });
     const gbpPath = client.gbp_account_name ? client.gbp_account_name + "/" + client.gbp_location_name : client.gbp_location_name;
 
+    // Convert WebP to JPG if needed before posting to Google
+    const finalImageUrl = imageUrl ? await convertWebpToJpg(imageUrl, summary.substring(0, 30)) : null;
+
     const postBody = {
       languageCode: "en",
       summary,
       topicType,
       ...(ctaUrl ? { callToAction: { actionType: ctaType, url: ctaUrl } } : {}),
-      ...(imageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: imageUrl }] } : {}),
+      ...(finalImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: finalImageUrl }] } : {}),
     };
 
     const postRes = await axios.post(
@@ -5471,12 +5490,21 @@ Return ONLY the GBP post text, nothing else.`;
 
     const summary = aiResponse.content[0].text.trim().substring(0, 1500);
 
+    // Build alternative images list for the image picker
+    const altImages = (clientImages || []).slice(0, 20).map(img => ({
+      id: img.id,
+      url: img.storage_path,
+      name: img.filename || img.category || "Image",
+      category: img.category || "",
+    }));
+
     res.json({
       success: true,
       summary,
       imageUrl: selectedImage?.storage_path || null,
       imageName: selectedImage?.filename || null,
       imageId: selectedImage?.id || null,
+      altImages,
     });
 
   } catch (e) {
