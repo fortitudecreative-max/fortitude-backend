@@ -1,7 +1,6 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
-const sharp = require("sharp");
 const multer = require("multer");
 const https = require("https");
 require("dotenv").config();
@@ -2113,22 +2112,18 @@ function buildExistingContentPrompt(existingContent) {
 // have been published after it. We enforce this by:
 //   1. Filtering out any image whose last_used_at is among the COOLDOWN most recent usages
 //   2. If all images are on cooldown (small library), use the least-recently-used one
-// Convert WebP image to JPG via Sharp, re-upload to Supabase, return new URL
+// Convert WebP URL to JPEG using Supabase image transformation (no extra dependencies)
 async function convertWebpToJpg(imageUrl, keyword) {
+  if (!imageUrl) return imageUrl;
+  const lower = imageUrl.toLowerCase();
+  if (!lower.endsWith(".webp")) return imageUrl;
   try {
-    if (!imageUrl || !imageUrl.toLowerCase().endsWith(".webp")) return imageUrl;
-    console.log("[Image] Converting WebP to JPG:", imageUrl);
-    const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
-    const jpgBuffer = await sharp(Buffer.from(response.data)).jpeg({ quality: 85 }).toBuffer();
-    const slug = (keyword || "image").toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 50);
-    const newPath = "staging/" + Date.now() + "_" + slug + ".jpg";
-    const { error } = await supabase.storage.from("image-library").upload(newPath, jpgBuffer, { contentType: "image/jpeg", upsert: true });
-    if (error) { console.error("[Image] JPG upload failed:", error); return imageUrl; }
-    const { data: urlData } = supabase.storage.from("image-library").getPublicUrl(newPath);
-    console.log("[Image] Converted to JPG:", urlData.publicUrl);
-    return urlData.publicUrl;
+    // Supabase render endpoint converts on-the-fly: /object/public/ -> /render/image/public/ + ?format=jpeg
+    const jpegUrl = imageUrl.replace("/storage/v1/object/public/", "/storage/v1/render/image/public/") + "?format=jpeg&quality=85";
+    console.log("[Image] Converted WebP URL to JPEG render URL:", jpegUrl);
+    return jpegUrl;
   } catch (e) {
-    console.error("[Image] WebP conversion failed:", e.message);
+    console.error("[Image] WebP URL conversion failed:", e.message);
     return imageUrl;
   }
 }
