@@ -1573,8 +1573,9 @@ async function generateResearchKeywords(client, count, excludeSet) {
     });
     const tb = msg.content.find(b => b.type === "text");
     if (tb) {
-      const parsed = JSON.parse(tb.text.trim().replace(/\`\`\`json|\`\`\`/g, "").trim());
-      const aiKws = parsed.filter(kw => !excludeSet.has(kw.toLowerCase()) && !libKeywords.find(l => l.keyword.toLowerCase() === kw.toLowerCase()))
+      const rawParsed = JSON.parse(tb.text.trim().replace(/\`\`\`json|\`\`\`/g, "").trim());
+      const parsed = rawParsed.map(kw => typeof kw === "string" ? kw : (kw.keyword || kw.name || String(kw)));
+      const aiKws = parsed.filter(kw => typeof kw === "string" && !excludeSet.has(kw.toLowerCase()) && !libKeywords.find(l => l.keyword.toLowerCase() === kw.toLowerCase()))
         .slice(0, stillNeeded).map(kw => ({ keyword: kw, volume: 0, intent: "Informational", source: "ai" }));
       libKeywords = [...libKeywords, ...aiKws];
     }
@@ -1606,13 +1607,15 @@ async function generateGapKeywords(client, count, excludeSet) {
       const tb = msg.content.find(b => b.type === "text");
       if (tb) {
         const parsed = JSON.parse(tb.text.trim().replace(/\`\`\`json|\`\`\`/g, "").trim());
-        results.push(...parsed);
+        const normalized = parsed.map(kw => typeof kw === "string" ? kw : (kw.keyword || kw.name || String(kw)));
+        results.push(...normalized);
       }
     } catch(e) { console.log("Gap gen error:", e.message); }
   }
 
   const seen = new Set();
   return results.filter(kw => {
+    if (typeof kw !== "string") return false;
     const lc = kw.toLowerCase();
     if (seen.has(lc) || excludeSet.has(lc)) return false;
     seen.add(lc);
@@ -1823,7 +1826,7 @@ app.post("/api/keywords/queue/gap-single", async (req, res) => {
     let suggestions = [];
     if (textBlock) {
       const clean = textBlock.text.trim().replace(/```json|```/g, "").trim();
-      suggestions = JSON.parse(clean).slice(0, 5).filter(kw => !existingSet.has(kw.toLowerCase()));
+      suggestions = JSON.parse(clean).map(kw => typeof kw === "string" ? kw : (kw.keyword || kw.name || String(kw))).slice(0, 5).filter(kw => typeof kw === "string" && !existingSet.has(kw.toLowerCase()));
     }
 
     res.json({ success: true, suggestions });
