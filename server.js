@@ -587,9 +587,19 @@ app.post("/api/content/generate", async (req, res) => {
         const pages = wpPagesRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "page" }));
         // Also fetch published blog posts for topic cluster internal linking
         const wpPostsRes = await axios.get(`${wordpressUrl}/wp-json/wp/v2/posts?per_page=30&status=publish&_fields=title,link,slug`, { httpsAgent });
-        const currentSlug = keyword.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        const kwLower = keyword.toLowerCase();
+        const kwWords = kwLower.split(/\s+/).filter(w => w.length > 3);
         const posts = wpPostsRes.data
-          .filter(p => p.slug !== currentSlug) // exclude the post being generated
+          .filter(p => {
+            // Exclude posts that are clearly about the same keyword (self-link prevention)
+            const titleLower = (p.title?.rendered || "").toLowerCase();
+            const slugLower = (p.slug || "").toLowerCase();
+            const titleMatchCount = kwWords.filter(w => titleLower.includes(w)).length;
+            const slugMatchCount = kwWords.filter(w => slugLower.includes(w)).length;
+            // If more than 60% of meaningful keyword words appear in title or slug, exclude it
+            const threshold = Math.ceil(kwWords.length * 0.6);
+            return titleMatchCount < threshold && slugMatchCount < threshold;
+          })
           .map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "post" }));
         internalPages = [...pages, ...posts];
       } catch (e) {
@@ -1989,28 +1999,43 @@ If you cannot find any confident URLs, return an empty array: []` }]
     });
 
     const raw = res.content[0]?.text?.trim().replace(/```json|```/g, "").trim();
+    console.log(`[ExternalLinks] Claude suggested: ${raw}`);
     const suggested = JSON.parse(raw);
     if (!Array.isArray(suggested)) return results;
 
-    // HEAD-check each suggested URL
+    // Verify each URL — try HEAD first, fall back to GET (many .gov/.org block HEAD)
     for (const item of suggested) {
       if (results.length >= 2) break;
       if (!item.url || !item.url.startsWith("http")) continue;
+      let verified = false;
+      // Try HEAD first
       try {
-        const check = await axios.head(item.url, { timeout: 5000, maxRedirects: 3, validateStatus: s => s < 400, httpsAgent });
-        if (check.status < 400) {
-          results.push({ url: item.url, domain: item.domain || new URL(item.url).hostname.replace("www.", ""), description: item.description || "" });
-          console.log(`[ExternalLinks] Verified: ${item.url}`);
-        } else {
-          console.log(`[ExternalLinks] Failed check (${check.status}): ${item.url}`);
-        }
+        const check = await axios.head(item.url, { timeout: 6000, maxRedirects: 5, validateStatus: s => s < 400, httpsAgent });
+        if (check.status < 400) verified = true;
       } catch(e) {
-        console.log(`[ExternalLinks] Dead link skipped: ${item.url} — ${e.message}`);
+        // HEAD failed — try GET with a small range to avoid downloading the whole page
+        try {
+          const check = await axios.get(item.url, {
+            timeout: 8000, maxRedirects: 5, httpsAgent,
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; FortitudeBot/1.0)", "Range": "bytes=0-500" },
+            validateStatus: s => s < 400 || s === 416, // 416 = range not satisfiable but page exists
+          });
+          if (check.status < 400 || check.status === 416) verified = true;
+        } catch(e2) {
+          console.log(`[ExternalLinks] Both HEAD and GET failed for ${item.url}: ${e2.message}`);
+        }
+      }
+      if (verified) {
+        results.push({ url: item.url, domain: item.domain || new URL(item.url).hostname.replace("www.", ""), description: item.description || "" });
+        console.log(`[ExternalLinks] Verified: ${item.url}`);
+      } else {
+        console.log(`[ExternalLinks] Could not verify: ${item.url}`);
       }
     }
   } catch(e) {
     console.log("[ExternalLinks] fetch error:", e.message);
   }
+  console.log(`[ExternalLinks] Returning ${results.length} verified links`);
   return results;
 }
 
@@ -3188,9 +3213,17 @@ const publishPostForClient = async (client, keyword, draftPost = null) => {
         const wpPagesRes = await axios.get(`${client.wordpress_url}/wp-json/wp/v2/pages?per_page=20&_fields=title,link,slug`, { httpsAgent });
         const pages = wpPagesRes.data.map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "page" }));
         const wpPostsRes = await axios.get(`${client.wordpress_url}/wp-json/wp/v2/posts?per_page=30&status=publish&_fields=title,link,slug`, { httpsAgent });
-        const currentSlug = keyword.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        const kwLower = keyword.toLowerCase();
+        const kwWords = kwLower.split(/\s+/).filter(w => w.length > 3);
         const posts = wpPostsRes.data
-          .filter(p => p.slug !== currentSlug)
+          .filter(p => {
+            const titleLower = (p.title?.rendered || "").toLowerCase();
+            const slugLower = (p.slug || "").toLowerCase();
+            const titleMatchCount = kwWords.filter(w => titleLower.includes(w)).length;
+            const slugMatchCount = kwWords.filter(w => slugLower.includes(w)).length;
+            const threshold = Math.ceil(kwWords.length * 0.6);
+            return titleMatchCount < threshold && slugMatchCount < threshold;
+          })
           .map(p => ({ title: p.title.rendered, url: p.link, slug: p.slug, type: "post" }));
         internalPages = [...pages, ...posts];
       } catch (e) {}
