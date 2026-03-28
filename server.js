@@ -3399,12 +3399,14 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
         const access_token = await getAgencyAccessToken();
         const gbpPath = client.gbp_account_name ? client.gbp_account_name + "/" + client.gbp_location_name : client.gbp_location_name;
         const gbpSummary = post.metaDescription || `${post.title} — read our latest post for expert tips and advice.`;
+        // Convert WebP to JPG if needed (Google API doesn't accept WebP)
+        const gbpImageUrl = featuredImage?.storage_path ? await convertWebpToJpg(featuredImage.storage_path, post.keyword || post.title || "scheduled") : null;
         const gbpBody = {
           languageCode: "en",
           summary: gbpSummary,
           topicType: "STANDARD",
           callToAction: { actionType: "LEARN_MORE", url: liveUrl || wpRes.data.link },
-          ...(featuredImage?.storage_path ? { media: [{ mediaFormat: "PHOTO", sourceUrl: featuredImage.storage_path }] } : {}),
+          ...(gbpImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: gbpImageUrl }] } : {}),
         };
         await axios.post(
           `https://mybusiness.googleapis.com/v4/${gbpPath}/localPosts`,
@@ -5265,7 +5267,10 @@ Return ONLY the GBP post text, nothing else.`;
 
     const summary = aiResponse.content[0].text.trim().substring(0, 1500);
 
-    // 4. Post to GBP
+    // 4. Convert WebP to JPG if needed (Google API doesn't accept WebP)
+    const finalImageUrl = featuredImageUrl ? await convertWebpToJpg(featuredImageUrl, keyword || "blog-post") : null;
+
+    // 5. Post to GBP
     const access_token = await getAgencyAccessToken();
     const gbpPath = clientData.gbp_account_name ? clientData.gbp_account_name + "/" + clientData.gbp_location_name : clientData.gbp_location_name;
     const postBody = {
@@ -5273,7 +5278,7 @@ Return ONLY the GBP post text, nothing else.`;
       summary,
       topicType: "STANDARD",
       callToAction: { actionType: "LEARN_MORE", url: blogUrl },
-      ...(featuredImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: featuredImageUrl }] } : {}),
+      ...(finalImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: finalImageUrl }] } : {}),
     };
 
     await axios.post(
