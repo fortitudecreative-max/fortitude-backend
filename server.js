@@ -688,15 +688,39 @@ ${regenPrompt ? `\n\nIMPORTANT — The user has reviewed a previous draft and wa
 The faqs array must have exactly 4 entries. Questions should be the kind of things people ask Google or AI assistants. Answers should be concise and direct. No HTML in faq answers or step text.
 Return only the JSON, no other text.`;
 
-    const message = await client.messages.create({
+    let message = await client.messages.create({
       model: "claude-sonnet-4-5",
-      max_tokens: 4000,
+      max_tokens: 8192,
       messages: [{ role: "user", content: userPrompt }],
       system: systemPrompt,
     });
 
-    const raw = message.content[0].text.trim();
-    const post = safeParsePostJson(raw);
+    let raw = message.content[0].text.trim();
+    if (message.stop_reason === "max_tokens") {
+      console.log("[Content] Response truncated (max_tokens hit) — retrying with higher limit...");
+      message = await client.messages.create({
+        model: "claude-sonnet-4-5",
+        max_tokens: 16000,
+        messages: [{ role: "user", content: userPrompt }],
+        system: systemPrompt,
+      });
+      raw = message.content[0].text.trim();
+    }
+
+    let post;
+    try {
+      post = safeParsePostJson(raw);
+    } catch (parseErr) {
+      console.log("[Content] JSON parse failed, retrying generation:", parseErr.message);
+      const retryMsg = await client.messages.create({
+        model: "claude-sonnet-4-5",
+        max_tokens: 8192,
+        messages: [{ role: "user", content: userPrompt + "\n\nCRITICAL: Return ONLY a valid JSON object. No markdown fences, no explanation text, just the JSON." }],
+        system: systemPrompt,
+      });
+      raw = retryMsg.content[0].text.trim();
+      post = safeParsePostJson(raw);
+    }
 
     // Safety net: convert any markdown that slipped through
     post.content = markdownToHtml(post.content);
@@ -2014,40 +2038,62 @@ function safeParsePostJson(raw) {
   text = text.replace(/,(\s*[}\]])/g, "$1");
   try { return JSON.parse(text); } catch(e) {}
 
-  // 5. If still failing, the JSON is likely truncated — try to recover by
-  // closing any open strings/arrays/objects so we can at least get partial data
+  // 5. Truncation recovery — close open strings, arrays, objects
   try {
-    // Count open braces/brackets
-    let depth = 0;
+    let depth = { brace: 0, bracket: 0 };
     let inString = false;
     let escape = false;
+    let lastSignificantChar = "";
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
       if (escape) { escape = false; continue; }
       if (ch === "\\") { escape = true; continue; }
       if (ch === '"' && !escape) { inString = !inString; continue; }
       if (inString) continue;
-      if (ch === "{" || ch === "[") depth++;
-      if (ch === "}" || ch === "]") depth--;
+      if (ch === "{") depth.brace++;
+      if (ch === "}") depth.brace--;
+      if (ch === "[") depth.bracket++;
+      if (ch === "]") depth.bracket--;
+      if (ch.trim()) lastSignificantChar = ch;
     }
-    // Close any unclosed strings
-    if (inString) text += '"';
-    // Close unclosed arrays/objects
-    // Walk back from depth to find what needs closing
     let repaired = text;
-    for (let i = 0; i < depth; i++) {
-      // Check what's open and close accordingly (simplified: just close with })
-      repaired += "}";
-    }
+    // Close any unclosed string
+    if (inString) repaired += '"';
+    // Remove any trailing comma
+    repaired = repaired.replace(/,\s*$/, "");
+    // Close unclosed arrays then objects
+    for (let i = 0; i < depth.bracket; i++) repaired += "]";
+    for (let i = 0; i < depth.brace; i++) repaired += "}";
+    // Fix trailing commas introduced by truncation
     repaired = repaired.replace(/,(\s*[}\]])/g, "$1");
     const parsed = JSON.parse(repaired);
     console.log("[JSON] Recovered truncated response with depth repair");
     return parsed;
   } catch(e) {}
 
+  // 6. Nuclear option: try to extract at least title/slug/content with regex
+  try {
+    const titleMatch = text.match(/"title"\s*:\s*"([^"]+)"/);
+    const slugMatch = text.match(/"slug"\s*:\s*"([^"]+)"/);
+    const metaMatch = text.match(/"metaDescription"\s*:\s*"([^"]+)"/);
+    // For content, grab everything between "content": " and the next top-level key
+    const contentMatch = text.match(/"content"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
+    if (titleMatch && contentMatch) {
+      console.log("[JSON] Nuclear recovery — extracted fields via regex");
+      return {
+        title: titleMatch[1],
+        slug: slugMatch ? slugMatch[1] : titleMatch[1].toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+        metaDescription: metaMatch ? metaMatch[1] : titleMatch[1],
+        content: contentMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"'),
+        wordCount: 0,
+        faqs: [],
+        steps: [],
+      };
+    }
+  } catch(e) {}
+
   throw new Error("Could not parse AI response as JSON: " + text.slice(0, 200));
 }
-
 function buildExternalLinksPrompt(externalLinks) {
   if (externalLinks && externalLinks.length > 0) {
     const linkList = externalLinks.map(l => `  URL: ${l.url}\n  Domain: ${l.domain}`).join("\n\n");
@@ -3164,9 +3210,9 @@ const publishPostForClient = async (client, keyword, draftPost = null) => {
         steps: [],
       };
     } else {
-    const message = await anthropic.messages.create({
+    let message = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
-      max_tokens: 4000,
+      max_tokens: 8192,
       system: `You are a professional SEO content writer specializing in home service companies. ${client.brand_voice ? `Brand voice: ${client.brand_voice}` : ""}
 
 CRITICAL CONTENT RULE: This blog content is for a professional home service company that earns revenue from service calls. You must NEVER write step-by-step DIY repair instructions that would allow a homeowner to fix the problem themselves and skip hiring a professional. Instead:
@@ -3200,8 +3246,25 @@ No HTML in faq answers or step text. Return ONLY the JSON object, no other text.
 {"title":"...","metaDescription":"...","slug":"...","content":"...","wordCount":0,"faqs":[],"steps":[]}` }],
     });
 
-    const raw = message.content[0].text.trim();
-    post = safeParsePostJson(raw);
+    let raw = message.content[0].text.trim();
+    if (message.stop_reason === "max_tokens") {
+      console.log("[Scheduler] WARNING: Response truncated (max_tokens hit at 8192) — parser will attempt recovery");
+    }
+    try {
+      post = safeParsePostJson(raw);
+    } catch (parseErr) {
+      console.log("[Scheduler] JSON parse failed on first attempt:", parseErr.message);
+      // Retry with explicit JSON-only instruction appended
+      const retryMsg = await anthropic.messages.create({
+        model: "claude-sonnet-4-5",
+        max_tokens: 8192,
+        messages: [{ role: "user", content: `Write a complete SEO blog post for "${client.name}" targeting the keyword: "${keyword}".
+Return ONLY a valid JSON object with these fields: title, metaDescription, slug, content (pure HTML), wordCount (integer), faqs (array of 4 objects with question and answer), steps (empty array []).
+CRITICAL: Output ONLY the JSON. No markdown fences, no explanation, no extra text.` }],
+      });
+      raw = retryMsg.content[0].text.trim();
+      post = safeParsePostJson(raw);
+    }
     // Safety net: convert any markdown that slipped into the content
     post.content = markdownToHtml(post.content);
 
