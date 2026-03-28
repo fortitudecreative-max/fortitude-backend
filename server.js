@@ -2112,6 +2112,62 @@ function buildExistingContentPrompt(existingContent) {
 // have been published after it. We enforce this by:
 //   1. Filtering out any image whose last_used_at is among the COOLDOWN most recent usages
 //   2. If all images are on cooldown (small library), use the least-recently-used one
+function selectFeaturedImage(images, keywordWords = []) {
+  if (!images || images.length === 0) return null;
+  const COOLDOWN = 10;
+
+  const stopWords = new Set(["the","and","for","with","from","that","this","your","have","will","how","what","when","why","are","its","into","about","can","does","our","their","which","been","they","you","not","but","was"]);
+  const meaningful = keywordWords.filter(w => w.length > 3 && !stopWords.has(w));
+
+  function scoreImage(img) {
+    if (meaningful.length === 0) return 0;
+    const searchText = ((img.category || "") + " " + (img.description || "")).toLowerCase();
+    let score = 0;
+    for (const word of meaningful) { if (searchText.includes(word)) score += 2; }
+    const cat = (img.category || "").toLowerCase();
+    for (const word of meaningful) { if (cat.includes(word)) score += 1; }
+    return score;
+  }
+
+  const recentlyUsed = [...images]
+    .filter(img => img.last_used_at)
+    .sort((a, b) => new Date(b.last_used_at) - new Date(a.last_used_at))
+    .slice(0, COOLDOWN)
+    .map(img => img.id);
+
+  const scored = images.map(img => ({ img, score: scoreImage(img), onCooldown: recentlyUsed.includes(img.id) }));
+  const relevant = scored.filter(s => s.score > 0 && !s.onCooldown);
+  const relevantOnCooldown = scored.filter(s => s.score > 0 && s.onCooldown);
+  const fallback = scored.filter(s => s.score === 0 && !s.onCooldown);
+  const fallbackOnCooldown = scored.filter(s => s.score === 0 && s.onCooldown);
+
+  function pickRandom(pool) {
+    if (pool.length === 0) return null;
+    pool.sort((a, b) => b.score - a.score);
+    const topScore = pool[0].score;
+    const topTier = pool.filter(s => s.score === topScore);
+    const pick = topTier[Math.floor(Math.random() * topTier.length)];
+    console.log("[Image] Selected " + (pick.score > 0 ? "by relevance" : "by rotation") + " (score " + pick.score + ", pool " + topTier.length + "): " + (pick.img.category || "") + " - " + (pick.img.description || ""));
+    return pick.img;
+  }
+
+  return pickRandom(relevant) || pickRandom(relevantOnCooldown) || pickRandom(fallback) || pickRandom(fallbackOnCooldown);
+}
+
+async function markImageUsed(imageId) {
+  if (!imageId) return;
+  try {
+    const { data: img } = await supabase.from("image_library").select("times_used").eq("id", imageId).single();
+    await supabase.from("image_library").update({
+      times_used: (img?.times_used || 0) + 1,
+      last_used_at: new Date().toISOString(),
+    }).eq("id", imageId);
+    console.log("Image usage tracked, ID:", imageId);
+  } catch (e) {
+    console.log("markImageUsed error:", e.message);
+  }
+}
+
 // ── WebP → JPG conversion (zero extra deps — uses Supabase image transform + re-upload) ──
 // Google My Business API does NOT accept WebP images. This function:
 // 1. Builds a Supabase render URL that converts WebP→JPEG on the fly
