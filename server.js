@@ -5124,9 +5124,6 @@ app.post("/api/gbp/post/:clientId", async (req, res) => {
     // Convert WebP to JPG if needed before posting to Google
     const finalImageUrl = imageUrl ? await convertWebpToJpg(imageUrl, summary.substring(0, 30)) : null;
 
-    // Convert WebP to JPG if needed (Google API doesn't accept WebP)
-    const finalImageUrl = imageUrl ? await convertWebpToJpg(imageUrl, summary.substring(0, 30)) : null;
-
     const postBody = {
       languageCode: "en",
       summary,
@@ -5325,6 +5322,9 @@ Return ONLY the GBP post text, nothing else.`;
 
     // 4. Mark image as used
     if (selectedImage) await markImageUsed(selectedImage.id);
+
+    // Convert WebP to JPG if needed before posting to Google
+    const finalImageUrl = imageUrl ? await convertWebpToJpg(imageUrl, summary.substring(0, 30)) : null;
 
     // 5. Post to GBP
     const access_token = await getAgencyAccessToken();
