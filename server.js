@@ -2114,6 +2114,12 @@ function buildExistingContentPrompt(existingContent) {
 //   2. If all images are on cooldown (small library), use the least-recently-used one
 function selectFeaturedImage(images, keywordWords = []) {
   if (!images || images.length === 0) return null;
+  // Filter out WebP images - Google My Business API only supports JPEG, PNG, GIF
+  images = images.filter(img => {
+    const path = (img.storage_path || "").toLowerCase();
+    return !path.endsWith(".webp");
+  });
+  if (images.length === 0) return null;
   const COOLDOWN = 10;
 
   // Build a meaningful word list from the keyword - skip stop words and short words
