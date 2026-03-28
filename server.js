@@ -5175,8 +5175,10 @@ app.post("/api/gbp/post/:clientId", async (req, res) => {
     );
     res.json({ success: true, post: postRes.data });
   } catch (e) {
-    console.error("GBP post error:", e.response?.data || e.message);
-    res.status(500).json({ error: e.response?.data?.error?.message || e.message });
+    console.error("GBP post error:", JSON.stringify(e.response?.data || e.message));
+    const errDetail = e.response?.data?.error;
+    const errMsg = errDetail ? `${errDetail.message}${errDetail.details ? " | " + JSON.stringify(errDetail.details) : ""}` : e.message;
+    res.status(500).json({ success: false, error: errMsg });
   }
 });
 
@@ -5379,8 +5381,10 @@ Return ONLY the GBP post text, nothing else.`;
     res.json({ success: true, summary, imageUrl, imageName: selectedImage?.filename || null });
 
   } catch (e) {
-    console.error("[gbp-generate] Error:", e.response?.data || e.message);
-    res.status(500).json({ success: false, error: e.response?.data?.error?.message || e.message });
+    console.error("[gbp-generate] Error:", JSON.stringify(e.response?.data || e.message));
+    const errDetail = e.response?.data?.error;
+    const errMsg = errDetail ? `${errDetail.message}${errDetail.details ? " | " + JSON.stringify(errDetail.details) : ""}` : e.message;
+    res.status(500).json({ success: false, error: errMsg });
   }
 });
 
