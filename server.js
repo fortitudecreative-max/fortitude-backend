@@ -1127,6 +1127,18 @@ app.post("/api/publish/wordpress", async (req, res) => {
       } catch(e) { console.error("scheduled_jobs insert error:", e.message); }
     }
 
+    // Mark the keyword queue row as used so it disappears from the Scheduled Queue
+    if (clientId && keyword) {
+      try {
+        const month = new Date().toISOString().slice(0, 7);
+        await supabase.from("client_keyword_queue")
+          .update({ used: true })
+          .eq("client_id", clientId)
+          .eq("keyword", keyword.trim())
+          .eq("month", month);
+      } catch(e) { console.log("keyword queue used update:", e.message); }
+    }
+
     // ── Respond immediately — post is live ────────────────────────────────
     res.json({ success: true, wpPostId: wpPost.id, wpPostUrl: wpPost.link, imageUploadError, status: wpPost.status, featuredMediaId, yoastEdition, longtailKeyphrase, fortitudePlugin: seoCaps.fortitudePlugin, canWriteSeoMeta: seoCaps.canWriteSeoMeta });
 
