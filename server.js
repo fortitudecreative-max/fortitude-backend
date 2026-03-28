@@ -2204,6 +2204,52 @@ async function markImageUsed(imageId) {
   }
 }
 
+// ── WebP → JPG conversion (pure JS via Jimp WASM, no native deps) ────────────
+// Google My Business API does NOT accept WebP images. This function:
+// 1. Downloads the WebP from Supabase storage
+// 2. Converts to JPEG using Jimp (WASM-based, works on Railway)
+// 3. Uploads the JPEG back to Supabase under converted/ folder
+// 4. Returns the permanent public URL of the new JPEG
+async function convertWebpToJpg(imageUrl, keyword) {
+  if (!imageUrl) return imageUrl;
+  if (!imageUrl.toLowerCase().endsWith(".webp")) return imageUrl;
+
+  try {
+    const { Jimp } = require("jimp");
+
+    // Download the WebP image as a buffer
+    console.log("[Image] Downloading WebP for conversion:", imageUrl);
+    const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
+    const buffer = Buffer.from(response.data);
+
+    // Convert to JPEG using Jimp (pure JS/WASM — no Sharp needed)
+    const image = await Jimp.read(buffer);
+    const jpegBuffer = await image.getBuffer("image/jpeg", { quality: 85 });
+
+    // Build a clean filename from keyword
+    const safeName = (keyword || "image").replace(/[^a-z0-9]+/gi, "-").toLowerCase().substring(0, 60);
+    const filename = `converted/${Date.now()}_${safeName}.jpg`;
+
+    // Upload to Supabase storage
+    const { error: uploadErr } = await supabase.storage
+      .from("image-library")
+      .upload(filename, jpegBuffer, { contentType: "image/jpeg", upsert: true });
+
+    if (uploadErr) throw uploadErr;
+
+    // Get the public URL
+    const { data: urlData } = supabase.storage
+      .from("image-library")
+      .getPublicUrl(filename);
+
+    console.log("[Image] Converted WebP → JPG:", urlData.publicUrl);
+    return urlData.publicUrl;
+  } catch (e) {
+    console.error("[Image] WebP→JPG conversion failed:", e.message);
+    return imageUrl; // fall back to original URL
+  }
+}
+
 // ── Markdown → HTML safety converter ─────────────────────────────────────────
 // Claude sometimes returns markdown inside JSON even when instructed not to.
 // This runs as a safety net on all post content before it goes to WordPress.
@@ -5171,6 +5217,9 @@ app.post("/api/gbp/post/:clientId", async (req, res) => {
     // Convert WebP to JPG if needed before posting to Google
     const finalImageUrl = imageUrl ? await convertWebpToJpg(imageUrl, summary.substring(0, 30)) : null;
 
+    // Convert WebP to JPG if needed (Google API doesn't accept WebP)
+    const finalImageUrl = imageUrl ? await convertWebpToJpg(imageUrl, summary.substring(0, 30)) : null;
+
     const postBody = {
       languageCode: "en",
       summary,
@@ -5379,7 +5428,7 @@ Return ONLY the GBP post text, nothing else.`;
       summary,
       topicType: "STANDARD",
       ...(ctaUrl ? { callToAction: { actionType: "LEARN_MORE", url: ctaUrl } } : {}),
-      ...(imageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: imageUrl }] } : {}),
+      ...(finalImageUrl ? { media: [{ mediaFormat: "PHOTO", sourceUrl: finalImageUrl }] } : {}),
     };
 
     await axios.post(
@@ -5480,6 +5529,10 @@ Return ONLY the GBP post text, nothing else.`;
     if (selectedImage?.id) await markImageUsed(selectedImage.id);
 
     // Build alternative images list for the image picker
+    // Build keyword-based rename for display
+    const keywordSlug = keywordText.replace(/[^a-z0-9]+/gi, "-").toLowerCase().substring(0, 60);
+    const keywordName = keywordSlug ? keywordSlug + ".jpg" : null;
+
     const altImages = (clientImages || []).slice(0, 20).map(img => ({
       id: img.id,
       url: img.storage_path,
@@ -5493,6 +5546,7 @@ Return ONLY the GBP post text, nothing else.`;
       imageUrl: selectedImage?.storage_path || null,
       imageName: selectedImage?.filename || null,
       imageId: selectedImage?.id || null,
+      keywordName,
       altImages,
     });
 
