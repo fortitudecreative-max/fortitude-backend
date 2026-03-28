@@ -2135,7 +2135,6 @@ async function convertWebpToJpg(imageUrl, keyword) {
 
 function selectFeaturedImage(images, keywordWords = []) {
   if (!images || images.length === 0) return null;
-
   const COOLDOWN = 10;
 
   // Build a meaningful word list from the keyword - skip stop words and short words
@@ -2168,39 +2167,31 @@ function selectFeaturedImage(images, keywordWords = []) {
     .slice(0, COOLDOWN)
     .map(img => img.id);
 
-  // Score ALL images regardless of cooldown first - relevance beats rotation
+  // Score ALL images
   const scored = images.map(img => ({ img, score: scoreImage(img), onCooldown: recentlyUsed.includes(img.id) }));
-  scored.sort((a, b) => {
-    // Primary: relevance score descending
-    if (b.score !== a.score) return b.score - a.score;
-    // Secondary: prefer not on cooldown
-    if (a.onCooldown !== b.onCooldown) return a.onCooldown ? 1 : -1;
-    // Tertiary: least recently used
-    if (!a.img.last_used_at) return -1;
-    if (!b.img.last_used_at) return 1;
-    return new Date(a.img.last_used_at) - new Date(b.img.last_used_at);
-  });
 
-  const best = scored[0];
+  // Separate into relevant (score > 0) and fallback (score === 0)
+  const relevant = scored.filter(s => s.score > 0 && !s.onCooldown);
+  const relevantOnCooldown = scored.filter(s => s.score > 0 && s.onCooldown);
+  const fallback = scored.filter(s => s.score === 0 && !s.onCooldown);
+  const fallbackOnCooldown = scored.filter(s => s.score === 0 && s.onCooldown);
 
-  // Only use this image if it has at least 1 relevance point.
-  // If nothing is relevant, fall back to rotation (cooldown-aware, least-used).
-  if (best && best.score > 0) {
-    console.log(`[Image] Selected by relevance (score ${best.score}): "${best.img.category}" — "${best.img.description}"`);
-    return best.img;
+  // Pick from the best available pool with randomization among top candidates
+  function pickRandom(pool) {
+    if (pool.length === 0) return null;
+    // Sort by score descending
+    pool.sort((a, b) => b.score - a.score);
+    // Get the top score tier (all with same highest score)
+    const topScore = pool[0].score;
+    const topTier = pool.filter(s => s.score === topScore);
+    // Random pick from top tier
+    const pick = topTier[Math.floor(Math.random() * topTier.length)];
+    console.log("[Image] Selected " + (pick.score > 0 ? "by relevance" : "by rotation") + " (score " + pick.score + ", pool " + topTier.length + "): \"" + (pick.img.category || "") + "\" — \"" + (pick.img.description || "") + "\"");
+    return pick.img;
   }
 
-  // No relevant image found - fall back to cooldown-aware rotation
-  console.log("[Image] No relevant image found - falling back to rotation");
-  const available = images.filter(img => !recentlyUsed.includes(img.id));
-  const pool = available.length > 0 ? available : images;
-  const fallback = [...pool].sort((a, b) => {
-    if ((a.times_used || 0) !== (b.times_used || 0)) return (a.times_used || 0) - (b.times_used || 0);
-    if (!a.last_used_at) return -1;
-    if (!b.last_used_at) return 1;
-    return new Date(a.last_used_at) - new Date(b.last_used_at);
-  });
-  return fallback[0];
+  // Priority: relevant not on cooldown > relevant on cooldown > fallback not on cooldown > fallback on cooldown
+  return pickRandom(relevant) || pickRandom(relevantOnCooldown) || pickRandom(fallback) || pickRandom(fallbackOnCooldown);
 }
 
 // Increments usage counter + timestamps image after selection.
@@ -5489,6 +5480,9 @@ Return ONLY the GBP post text, nothing else.`;
     });
 
     const summary = aiResponse.content[0].text.trim().substring(0, 1500);
+
+    // Mark image as used so it rotates on next generate
+    if (selectedImage?.id) await markImageUsed(selectedImage.id);
 
     // Build alternative images list for the image picker
     const altImages = (clientImages || []).slice(0, 20).map(img => ({
