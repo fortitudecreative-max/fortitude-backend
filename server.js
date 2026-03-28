@@ -5274,11 +5274,15 @@ app.post("/api/gbp/generate-update/:clientId", requireAuth, async (req, res) => 
 
   try {
     // 1. Get client info
-    const { data: clientData } = await supabase
+    const { data: clientData, error: clientError } = await supabase
       .from("clients")
       .select("gbp_location_name, name, industry, service_area, website_url")
       .eq("id", clientId)
       .single();
+    if (clientError) {
+      console.error("[gbp-generate] Supabase query error:", clientError);
+      return res.status(400).json({ success: false, error: "DB query failed: " + clientError.message });
+    }
     if (!clientData || !clientData.gbp_location_name) {
       return res.status(400).json({ success: false, error: "No GBP location assigned to this client" });
     }
@@ -5379,11 +5383,15 @@ app.post("/api/gbp/generate-preview/:clientId", requireAuth, async (req, res) =>
   const { mode, topic, keyword, blogTitle, blogContent, metaDescription } = req.body;
 
   try {
-    const { data: clientData } = await supabase
+    const { data: clientData, error: clientError } = await supabase
       .from("clients")
       .select("gbp_location_name, name, industry, service_area, website_url")
       .eq("id", clientId)
       .single();
+    if (clientError) {
+      console.error("[gbp-preview] Supabase query error:", clientError);
+      return res.status(400).json({ success: false, error: "DB query failed: " + clientError.message });
+    }
     if (!clientData) return res.status(400).json({ success: false, error: "Client not found" });
 
     // Auto-select image
