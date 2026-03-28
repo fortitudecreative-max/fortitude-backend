@@ -2112,40 +2112,39 @@ function buildExistingContentPrompt(existingContent) {
 // have been published after it. We enforce this by:
 //   1. Filtering out any image whose last_used_at is among the COOLDOWN most recent usages
 //   2. If all images are on cooldown (small library), use the least-recently-used one
-// ── WebP → JPG conversion (pure JS via Jimp WASM, no native deps) ────────────
+// ── WebP → JPG conversion (zero extra deps — uses Supabase image transform + re-upload) ──
 // Google My Business API does NOT accept WebP images. This function:
-// 1. Downloads the WebP from Supabase storage
-// 2. Converts to JPEG using Jimp (WASM-based, works on Railway)
-// 3. Uploads the JPEG back to Supabase under converted/ folder
-// 4. Returns the permanent public URL of the new JPEG
+// 1. Builds a Supabase render URL that converts WebP→JPEG on the fly
+// 2. Downloads the JPEG bytes server-side via axios (already installed)
+// 3. Uploads the JPEG to Supabase storage under converted/ folder
+// 4. Returns the permanent public URL of the new JPEG (which Google CAN fetch)
 async function convertWebpToJpg(imageUrl, keyword) {
   if (!imageUrl) return imageUrl;
   if (!imageUrl.toLowerCase().endsWith(".webp")) return imageUrl;
 
   try {
-    const { Jimp } = require("jimp");
+    // Step 1: Build Supabase render URL that converts to JPEG
+    const renderUrl = imageUrl
+      .replace("/storage/v1/object/public/", "/storage/v1/render/image/public/")
+      + "?format=jpeg&quality=85";
+    console.log("[Image] Fetching JPEG from Supabase render URL (server-side)...");
 
-    // Download the WebP image as a buffer
-    console.log("[Image] Downloading WebP for conversion:", imageUrl);
-    const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
-    const buffer = Buffer.from(response.data);
+    // Step 2: Download the converted JPEG bytes (server-to-server, this works fine)
+    const response = await axios.get(renderUrl, { responseType: "arraybuffer", timeout: 15000 });
+    const jpegBuffer = Buffer.from(response.data);
+    console.log("[Image] Downloaded JPEG bytes:", jpegBuffer.length, "bytes");
 
-    // Convert to JPEG using Jimp (pure JS/WASM — no Sharp needed)
-    const image = await Jimp.read(buffer);
-    const jpegBuffer = await image.getBuffer("image/jpeg", { quality: 85 });
-
-    // Build a clean filename from keyword
+    // Step 3: Upload to Supabase storage as a permanent .jpg file
     const safeName = (keyword || "image").replace(/[^a-z0-9]+/gi, "-").toLowerCase().substring(0, 60);
     const filename = `converted/${Date.now()}_${safeName}.jpg`;
 
-    // Upload to Supabase storage
     const { error: uploadErr } = await supabase.storage
       .from("image-library")
       .upload(filename, jpegBuffer, { contentType: "image/jpeg", upsert: true });
 
     if (uploadErr) throw uploadErr;
 
-    // Get the public URL
+    // Step 4: Get the permanent public URL
     const { data: urlData } = supabase.storage
       .from("image-library")
       .getPublicUrl(filename);
