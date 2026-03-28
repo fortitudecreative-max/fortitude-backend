@@ -5572,17 +5572,22 @@ Return ONLY the GBP post text, nothing else.`;
     // Mark image as used so it rotates on next generate
     if (selectedImage?.id) await markImageUsed(selectedImage.id);
 
-    // Build alternative images list for the image picker
-    // Build keyword-based rename for display
+    // Build alternative images list — scored by relevance to keyword, shuffled within tiers
     const keywordSlug = keywordText.replace(/[^a-z0-9]+/gi, "-").toLowerCase().substring(0, 60);
     const keywordName = keywordSlug ? keywordSlug + ".jpg" : null;
 
-    const altImages = (clientImages || []).slice(0, 20).map(img => ({
-      id: img.id,
-      url: img.storage_path,
-      name: img.filename || img.category || "Image",
-      category: img.category || "",
-    }));
+    const altStopWords = new Set(["the","and","for","with","from","that","this","your","have","will","how","what","when","why","are","its","into","about","can","does","our","their","which","been","they","you","not","but","was"]);
+    const altMeaningful = keywordWords.filter(w => w.length > 3 && !altStopWords.has(w));
+    const scoredAlts = (clientImages || []).map(img => {
+      const searchText = ((img.category || "") + " " + (img.description || "") + " " + (img.filename || "")).toLowerCase();
+      let score = 0;
+      for (const word of altMeaningful) { if (searchText.includes(word)) score += 2; }
+      const cat = (img.category || "").toLowerCase();
+      for (const word of altMeaningful) { if (cat.includes(word)) score += 1; }
+      return { id: img.id, url: img.storage_path, name: img.filename || img.category || "Image", category: img.category || "", description: img.description || "", score };
+    });
+    scoredAlts.sort((a, b) => b.score !== a.score ? b.score - a.score : Math.random() - 0.5);
+    const altImages = scoredAlts;
 
     res.json({
       success: true,
