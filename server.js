@@ -5276,7 +5276,7 @@ app.post("/api/gbp/generate-update/:clientId", requireAuth, async (req, res) => 
     // 1. Get client info
     const { data: clientData, error: clientError } = await supabase
       .from("clients")
-      .select("gbp_location_name, name, industry, service_area, website_url")
+      .select("gbp_location_name, name, industry, service_area, domain")
       .eq("id", clientId)
       .single();
     if (clientError) {
@@ -5353,7 +5353,7 @@ Return ONLY the GBP post text, nothing else.`;
 
     // 5. Post to GBP
     const access_token = await getAgencyAccessToken();
-    const ctaUrl = mode === "blog" && blogUrl ? blogUrl : (clientData.website_url || "");
+    const ctaUrl = mode === "blog" && blogUrl ? blogUrl : (clientData.domain || "");
     const postBody = {
       languageCode: "en",
       summary,
@@ -5385,7 +5385,7 @@ app.post("/api/gbp/generate-preview/:clientId", requireAuth, async (req, res) =>
   try {
     const { data: clientData, error: clientError } = await supabase
       .from("clients")
-      .select("gbp_location_name, name, industry, service_area, website_url")
+      .select("gbp_location_name, name, industry, service_area, domain")
       .eq("id", clientId)
       .single();
     if (clientError) {
